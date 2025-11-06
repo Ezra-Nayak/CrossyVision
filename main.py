@@ -219,6 +219,7 @@ class FaceMasker:
 
 # Control parameters
 COOLDOWN_SECONDS = 0.08          # Cooldown for individual finger presses.
+FORCE_CALIBRATION_SECONDS = 2.0   # If finger is held down for this long, force recalibration.
 CALIBRATION_FRAMES = 1200         # Number of frames to average for the trigger line (~1 second).
 RELATIVE_THRESHOLD_PERCENT = 0.85 # Trigger line is 40% of the way down from the MCP. Tune this for comfort.
 
@@ -277,6 +278,7 @@ mcp_history = {}            # Stores recent MCP joint Y-positions for averaging
 finger_lengths = {}         # Stores recent finger lengths for averaging
 trigger_thresholds = {}     # Stores the calculated trigger line Y-position for each finger
 previous_finger_is_above = {} # Stores the last known position relative to the trigger line
+time_finger_went_below = {} # For forced recalibration
 
 # For state stabilization (debouncing)
 activation_counter = 0
@@ -419,10 +421,17 @@ while True:
                             mcp_history[finger_id] = deque(maxlen=CALIBRATION_FRAMES)
                             finger_lengths[finger_id] = deque(maxlen=CALIBRATION_FRAMES)
 
-                            # --- Conditional Calibration ---
-                            # Only update the calibration history if the finger is in the "ready" state (above the line).
-                            # This prevents the trigger line from drifting downwards during rapid presses.
-                        if previous_finger_is_above.get(finger_id, True):
+                        # --- Conditional Calibration ---
+                        # Only update calibration if the finger is "ready" (above the line) OR if it has been held
+                        # below the line for a set time, forcing recalibration to the new resting position.
+                        force_recalibration = False
+                        if not previous_finger_is_above.get(finger_id, True):  # If finger is below the line
+                            if finger_id in time_finger_went_below and time_finger_went_below[
+                                finger_id] is not None:
+                                if (current_time - time_finger_went_below[finger_id]) > FORCE_CALIBRATION_SECONDS:
+                                    force_recalibration = True
+
+                        if previous_finger_is_above.get(finger_id, True) or force_recalibration:
                             mcp_history[finger_id].append(mcp_pos.y)
                             finger_lengths[finger_id].append(current_length)
 
@@ -447,6 +456,15 @@ while True:
                         threshold_y = trigger_thresholds[finger_id]
                         finger_is_currently_above = tip_pos_y < threshold_y
                         finger_was_previously_above = previous_finger_is_above.get(finger_id, True)
+
+                        # --- Manage Forced Recalibration Timer ---
+                        # If finger just went below the line, start the timer.
+                        if finger_was_previously_above and not finger_is_currently_above:
+                            time_finger_went_below[finger_id] = current_time
+                        # If finger went back above the line, stop the timer.
+                        elif not finger_was_previously_above and finger_is_currently_above:
+                            time_finger_went_below[finger_id] = None  # Reset the timer
+
                         if finger_was_previously_above and not finger_is_currently_above:
                             if (current_time - last_key_press_time.get(key_action, 0)) > COOLDOWN_SECONDS:
                                 threading.Thread(target=press_key_threaded, args=(key_action, 0.05),
