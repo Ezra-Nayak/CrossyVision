@@ -2,16 +2,20 @@ import cv2
 import mediapipe as mp
 import time
 from pyKey import press
+from collections import deque
+import datetime
 
 # --- Constants and Initialization ---
 
 # Control parameters
-COOLDOWN_SECONDS = 0.3  # Cooldown for twitch/fold actions. May need tuning.
+COOLDOWN_SECONDS = 0.2          # Shorter cooldown for more responsive twitch controls.
+CALIBRATION_FRAMES = 60         # Number of frames to average for the trigger line (e.g., ~1 second).
+THRESHOLD_OFFSET = 0.2         # Normalized offset to create a dead zone above the baseline.
 
 # MediaPipe Hands setup
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(
-    model_complexity=0,
+    model_complexity=1,
     max_num_hands=2,
     min_detection_confidence=0.7,
     min_tracking_confidence=0.7
@@ -28,9 +32,12 @@ cap.set(cv2.CAP_PROP_FPS, 60)
 prev_frame_time = 0
 
 # Dictionaries to hold state information
-controls_active = False     # Global state for whether controls are on or off
-previous_finger_states = {} # Stores the last known extended state (True/False) for each finger
-last_key_press_time = {}    # Stores the timestamp of the last press for each key
+controls_active = False
+last_key_press_time = {}
+# NEW: For dynamic thresholds
+mcp_history = {}            # Stores recent MCP joint Y-positions for averaging
+trigger_thresholds = {}     # Stores the calculated trigger line Y-position for each finger
+previous_finger_is_above = {} # Stores the last known position relative to the trigger line
 
 print("Starting Milestone 3 (Revised): Finger Fold Detection. Press 'ESC' to quit.")
 print("Ensure Crossy Road is the active window!")
@@ -114,77 +121,108 @@ while cap.isOpened():
     if not controls_active and (left_hand_in_position and right_hand_in_position):
         print("CONTROLS ACTIVATED")
         controls_active = True
-        # Clear previous states to avoid false triggers on activation
-        previous_finger_states.clear()
     elif controls_active and not (left_hand_in_position and right_hand_in_position):
         print("CONTROLS DEACTIVATED")
         controls_active = False
 
-    # --- Control Logic (NEW FOLD DETECTION) ---
-    if controls_active and results.multi_hand_landmarks:
-        current_time = time.time()
+    # --- Control Logic (CONTINUOUS CALIBRATION) ---
+    frame_height, frame_width, _ = frame.shape
+    current_time = time.time()
 
+    # Part 1: Always perform calibration for any visible hand in the control pose
+    if results.multi_hand_landmarks:
+        for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
+            if is_control_gesture_active(hand_landmarks):
+                handedness = results.multi_handedness[i].classification[0].label
+                landmarks = hand_landmarks.landmark
+
+                control_fingers = {
+                    "INDEX": (mp_hands.HandLandmark.INDEX_FINGER_TIP, mp_hands.HandLandmark.INDEX_FINGER_MCP),
+                    "MIDDLE": (mp_hands.HandLandmark.MIDDLE_FINGER_TIP, mp_hands.HandLandmark.MIDDLE_FINGER_MCP)
+                }
+
+                for finger_name, (tip_id, mcp_id) in control_fingers.items():
+                    finger_id = f"{handedness.upper()}_{finger_name}"
+                    mcp_pos_y = landmarks[mcp_id].y
+                    tip_pos_y = landmarks[tip_id].y
+
+                    # Update history
+                    if finger_id not in mcp_history:
+                        mcp_history[finger_id] = deque(maxlen=CALIBRATION_FRAMES)
+                    mcp_history[finger_id].append(mcp_pos_y)
+
+                    # NEW LOGIC: Calculate average as long as there's data
+                    if len(mcp_history[finger_id]) > 0:
+                        avg_mcp_y = sum(mcp_history[finger_id]) / len(mcp_history[finger_id])
+                        threshold_y = avg_mcp_y - THRESHOLD_OFFSET
+                        trigger_thresholds[finger_id] = threshold_y
+
+                        # LOGGING: Print calibration data
+                        print(
+                            f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] CALIBRATING {finger_id}: "
+                            f"History len={len(mcp_history[finger_id])}, AvgMCP_Y={avg_mcp_y:.2f}, Threshold_Y="
+                            f"{threshold_y:.2f}"
+                        )
+
+                        # Update the finger's initial position relative to the threshold
+                        if finger_id not in previous_finger_is_above:
+                            previous_finger_is_above[finger_id] = tip_pos_y < threshold_y
+
+    # Part 2: Only trigger key presses if controls are globally active
+    if controls_active and results.multi_hand_landmarks:
         for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
             handedness = results.multi_handedness[i].classification[0].label
             landmarks = hand_landmarks.landmark
 
-            # Get current extended state of control fingers
-            index_is_extended = is_finger_extended(landmarks, mp_hands.HandLandmark.INDEX_FINGER_TIP,
-                                                   mp_hands.HandLandmark.INDEX_FINGER_PIP)
-            middle_is_extended = is_finger_extended(landmarks, mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
-                                                    mp_hands.HandLandmark.MIDDLE_FINGER_PIP)
+            key_mappings = {
+                "INDEX": 'RIGHT' if handedness == "Left" else 'UP',
+                "MIDDLE": 'LEFT' if handedness == "Left" else 'DOWN'
+            }
 
-            # Define finger IDs for our state dictionary
-            right_index_id = 'RIGHT_INDEX'
-            right_middle_id = 'RIGHT_MIDDLE'
-            left_index_id = 'LEFT_INDEX'
-            left_middle_id = 'LEFT_MIDDLE'
+            for finger_name, key_action in key_mappings.items():
+                finger_id = f"{handedness.upper()}_{finger_name}"
 
-            if handedness == "Right":
-                # Check for UP action (index finger fold)
-                if previous_finger_states.get(right_index_id, True) and not index_is_extended:
-                    if (current_time - last_key_press_time.get('UP', 0)) > COOLDOWN_SECONDS:
-                        press('UP', 0.1)
-                        print("ACTION: UP")
-                        last_key_press_time['UP'] = current_time
+                if finger_id in trigger_thresholds:
+                    tip_pos_y = landmarks[mp_hands.HandLandmark[f"{finger_name}_FINGER_TIP"]].y
+                    threshold_y = trigger_thresholds[finger_id]
 
-                # Check for DOWN action (middle finger fold)
-                if previous_finger_states.get(right_middle_id, True) and not middle_is_extended:
-                    if (current_time - last_key_press_time.get('DOWN', 0)) > COOLDOWN_SECONDS:
-                        press('DOWN', 0.1)
-                        print("ACTION: DOWN")
-                        last_key_press_time['DOWN'] = current_time
+                    finger_is_currently_above = tip_pos_y < threshold_y
+                    finger_was_previously_above = previous_finger_is_above.get(finger_id, True)
 
-                # Update previous states for right hand fingers
-                previous_finger_states[right_index_id] = index_is_extended
-                previous_finger_states[right_middle_id] = middle_is_extended
+                    if finger_was_previously_above and not finger_is_currently_above:
+                        if (current_time - last_key_press_time.get(key_action, 0)) > COOLDOWN_SECONDS:
+                            press(key_action, 0.05)
+                            print(f"--- ACTION: {key_action} ---")  # Make action log stand out
+                            last_key_press_time[key_action] = current_time
 
-            elif handedness == "Left":
-                # Check for RIGHT action (index finger fold)
-                if previous_finger_states.get(left_index_id, True) and not index_is_extended:
-                    if (current_time - last_key_press_time.get('RIGHT', 0)) > COOLDOWN_SECONDS:
-                        press('RIGHT', 0.1)
-                        print("ACTION: RIGHT")
-                        last_key_press_time['RIGHT'] = current_time
-
-                # Check for LEFT action (middle finger fold)
-                if previous_finger_states.get(left_middle_id, True) and not middle_is_extended:
-                    if (current_time - last_key_press_time.get('LEFT', 0)) > COOLDOWN_SECONDS:
-                        press('LEFT', 0.1)
-                        print("ACTION: LEFT")
-                        last_key_press_time['LEFT'] = current_time
-
-                # Update previous states for left hand fingers
-                previous_finger_states[left_index_id] = index_is_extended
-                previous_finger_states[left_middle_id] = middle_is_extended
-    else:
-        # If controls are not active, reset the finger states to avoid false triggers
-        previous_finger_states.clear()
+                    previous_finger_is_above[finger_id] = finger_is_currently_above
 
     # --- Visual Feedback ---
     if results.multi_hand_landmarks:
-        for hand_landmarks in results.multi_hand_landmarks:
+        for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
+            # Draw the hand skeleton
             mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+            # Draw the dynamic trigger lines and highlight fingertips
+            handedness = results.multi_handedness[i].classification[0].label
+            landmarks = hand_landmarks.landmark
+
+            control_fingers_vis = {"INDEX": mp_hands.HandLandmark.INDEX_FINGER_TIP,
+                                   "MIDDLE": mp_hands.HandLandmark.MIDDLE_FINGER_TIP}
+
+            for finger_name, tip_id in control_fingers_vis.items():
+                finger_id = f"{handedness.upper()}_{finger_name}"
+                if finger_id in trigger_thresholds:
+                    threshold_y_pixels = int(trigger_thresholds[finger_id] * frame_height)
+                    tip_pos_x_pixels = int(landmarks[tip_id].x * frame_width)
+
+                    # Line color depends on finger position relative to threshold
+                    is_above = previous_finger_is_above.get(finger_id, True)
+                    line_color = (0, 255, 0) if is_above else (0, 0, 255)  # Green if above, Red if below
+
+                    # Draw the line
+                    cv2.line(frame, (tip_pos_x_pixels - 30, threshold_y_pixels),
+                             (tip_pos_x_pixels + 30, threshold_y_pixels), line_color, 2)
 
     status_text = "CONTROLS ACTIVE" if controls_active else "WAITING FOR GESTURE"
     color = (0, 255, 0) if controls_active else (0, 255, 255)
