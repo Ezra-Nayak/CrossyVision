@@ -210,8 +210,8 @@ class FaceMasker:
 # --- Constants and Initialization ---
 
 # Control parameters
-COOLDOWN_SECONDS = 0.12          # Cooldown for individual finger presses.
-CALIBRATION_FRAMES = 500         # Number of frames to average for the trigger line (~1 second).
+COOLDOWN_SECONDS = 0.08          # Cooldown for individual finger presses.
+CALIBRATION_FRAMES = 1200         # Number of frames to average for the trigger line (~1 second).
 RELATIVE_THRESHOLD_PERCENT = 0.85 # Trigger line is 40% of the way down from the MCP. Tune this for comfort.
 
 # State stabilization parameters
