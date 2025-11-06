@@ -87,6 +87,126 @@ class MediaPipeProcessor:
     def stop(self):
         self.stopped = True
 
+class FaceMasker:
+    """
+    Runs face detection and smoothing in a dedicated thread at a fixed rate (60 UPS)
+    to provide a stable, jitter-free overlay, independent of the main loop's frame rate.
+    """
+
+    def __init__(self, stream, mask_image):
+        self.stream = stream  # The WebcamVideoStream instance
+        self.mask_image = mask_image
+        self.stopped = False
+
+        # MediaPipe Face Detection setup
+        self.face_detection = mp.solutions.face_detection.FaceDetection(model_selection=0,
+                                                                        min_detection_confidence=0.5)
+
+        # State variables for smoothing and storing the final bbox
+        self.smoothed_bbox = None
+        self.latest_bbox_for_overlay = None  # This will be read by the main thread
+
+        # Threading lock to prevent race conditions when accessing the bbox
+        self.lock = threading.Lock()
+
+    def start(self):
+        Thread(target=self.update, args=(), daemon=True).start()
+        return self
+
+    def update(self):
+        """
+        This loop runs in its own thread, constantly detecting the face
+        and updating the smoothed bounding box at a fixed rate.
+        """
+        updates_per_second = 60
+        sleep_duration = 1.0 / updates_per_second
+
+        while not self.stopped:
+            start_time = time.time()
+
+            frame = self.stream.read()
+            if frame is None:
+                time.sleep(sleep_duration)
+                continue
+
+            # Process for faces
+            face_frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            face_results = self.face_detection.process(face_frame_rgb)
+            ih, iw, _ = frame.shape
+
+            current_bbox = None
+            if face_results.detections:
+                detection = face_results.detections[0]
+                bboxC = detection.location_data.relative_bounding_box
+                current_bbox = (int(bboxC.xmin * iw), int(bboxC.ymin * ih),
+                                int(bboxC.width * iw), int(bboxC.height * ih))
+
+            # --- Bounding Box Smoothing ---
+            if current_bbox:
+                if self.smoothed_bbox is None:
+                    self.smoothed_bbox = current_bbox
+                else:
+                    x1, y1, w1, h1 = self.smoothed_bbox
+                    x2, y2, w2, h2 = current_bbox
+                    # A more aggressive smoothing factor works better in a fixed-rate loop
+                    smoothing = 0.1
+                    new_x = int(x1 * (1 - smoothing) + x2 * smoothing)
+                    new_y = int(y1 * (1 - smoothing) + y2 * smoothing)
+                    new_w = int(w1 * (1 - smoothing) + w2 * smoothing)
+                    new_h = int(h1 * (1 - smoothing) + h2 * smoothing)
+                    self.smoothed_bbox = (new_x, new_y, new_w, new_h)
+
+            # Safely update the bbox that the main thread will read
+            with self.lock:
+                self.latest_bbox_for_overlay = self.smoothed_bbox
+
+            # Maintain the 60 UPS rate
+            elapsed_time = time.time() - start_time
+            time.sleep(max(0, sleep_duration - elapsed_time))
+
+    def apply_mask(self, frame):
+        """
+        Called from the main loop to draw the mask on the frame
+        using the latest calculated bounding box.
+        """
+        local_bbox = None
+        with self.lock:
+            if self.latest_bbox_for_overlay:
+                local_bbox = self.latest_bbox_for_overlay
+
+        if local_bbox:
+            ih, iw, _ = frame.shape
+            x, y, w, h = local_bbox
+
+            # --- Expanded Bounding Box for Full Coverage ---
+            # Shift up significantly and expand to cover hair/forehead/chin
+            x_new = x - int(w * 0.25)
+            y_new = y - int(h * 0.55)  # Shift up by ~55% of face height
+            w_new = int(w * 1.5)  # Make mask 50% wider than face
+            h_new = int(h * 1.8)  # Make mask 80% taller than face
+
+            y1, y2 = max(0, y_new), min(ih, y_new + h_new)
+            x1, x2 = max(0, x_new), min(iw, x_new + w_new)
+
+            roi_h, roi_w = y2 - y1, x2 - x1
+
+            if roi_h > 0 and roi_w > 0:
+                mask_resized = cv2.resize(self.mask_image, (roi_w, roi_h))
+                # Opaque image logic: simply replace the region
+                if mask_resized.shape[2] != 4:
+                    frame[y1:y2, x1:x2] = mask_resized
+                # Transparent image logic
+                else:
+                    roi = frame[y1:y2, x1:x2]
+                    mask_bgr = mask_resized[:, :, :3]
+                    alpha = (mask_resized[:, :, 3] / 255.0)[:, :, np.newaxis]
+                    blended = (roi.astype(float) * (1 - alpha) + mask_bgr.astype(float) * alpha)
+                    frame[y1:y2, x1:x2] = blended.astype(np.uint8)
+        return frame
+
+    def stop(self):
+        self.stopped = True
+
 # --- Constants and Initialization ---
 
 # Control parameters
@@ -109,12 +229,31 @@ hands = mp_hands.Hands(
 )
 mp_drawing = mp.solutions.drawing_utils
 
+# --- Face Masking Setup ---
+MASK_FACE = True # Set to False to disable face masking
+
+# Load the mask image
+if MASK_FACE:
+    try:
+        mask_image = cv2.imread("mask.png", cv2.IMREAD_UNCHANGED)
+        if mask_image is None:
+            print("Warning: 'mask.png' not found or could not be read. Face masking will be disabled.")
+            MASK_FACE = False
+    except Exception as e:
+        print(f"Error loading 'mask.png': {e}. Face masking will be disabled.")
+        MASK_FACE = False
+
 # --- Threaded Setup ---
 print("Starting threaded services...")
 # Start the camera stream thread
 vs = WebcamVideoStream(src=0).start()
-# Start the MediaPipe processing thread, passing it the camera stream and hands object
+# Start the MediaPipe processing thread
 processor = MediaPipeProcessor(stream=vs, hands_instance=hands).start()
+# Start the Face Masking thread if enabled
+face_masker = None
+if MASK_FACE:
+    face_masker = FaceMasker(stream=vs, mask_image=mask_image).start()
+
 time.sleep(2.0) # Allow services to warm up
 
 # --- State Variables ---
@@ -136,8 +275,6 @@ activation_counter = 0
 deactivation_counter = 0
 
 print("CrossyVision Controller Initialized. Press 'ESC' to quit.")
-print("Ensure Crossy Road is the active window!")
-
 
 # --- Helper Functions ---
 
@@ -192,15 +329,16 @@ while True:
     if frame is None or results is None:
         continue
 
+    # --- Face Masking Logic ---
+    if MASK_FACE and face_masker:
+        frame = face_masker.apply_mask(frame)
+
     # --- ALL LOGIC NOW USES THE PROCESSED FRAME AND RESULTS ---
     current_time = time.time()
     frame_height, frame_width, _ = frame.shape
 
     # Master Gesture Check (Reset)
     reset_gesture_detected = False
-    # (The rest of your existing, working logic goes here, unchanged)
-    # ...
-    # (The following is your complete, verified logic block, now correctly placed)
     if results.multi_hand_landmarks and len(results.multi_hand_landmarks) == 2:
         hand_states = {}
         for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
@@ -402,6 +540,8 @@ while True:
 
 # --- Cleanup ---
 print("Shutting down services...")
+if face_masker:
+    face_masker.stop()
 processor.stop()
 vs.stop()
 cv2.destroyAllWindows()
