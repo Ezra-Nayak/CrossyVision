@@ -8,9 +8,9 @@ import datetime
 # --- Constants and Initialization ---
 
 # Control parameters
-COOLDOWN_SECONDS = 0.2          # Shorter cooldown for more responsive twitch controls.
+COOLDOWN_SECONDS = 0.1          # Shorter cooldown for more responsive twitch controls.
 CALIBRATION_FRAMES = 60         # Number of frames to average for the trigger line (e.g., ~1 second).
-THRESHOLD_OFFSET = 0.2         # Normalized offset to create a dead zone above the baseline.
+RELATIVE_THRESHOLD_PERCENT = 0.8 # Trigger line is 40% of the way down from the MCP. Tune this for comfort.
 
 # MediaPipe Hands setup
 mp_hands = mp.solutions.hands
@@ -34,8 +34,9 @@ prev_frame_time = 0
 # Dictionaries to hold state information
 controls_active = False
 last_key_press_time = {}
-# NEW: For dynamic thresholds
+# For dynamic thresholds
 mcp_history = {}            # Stores recent MCP joint Y-positions for averaging
+finger_lengths = {}         # Stores recent finger lengths for averaging
 trigger_thresholds = {}     # Stores the calculated trigger line Y-position for each finger
 previous_finger_is_above = {} # Stores the last known position relative to the trigger line
 
@@ -143,30 +144,32 @@ while cap.isOpened():
 
                 for finger_name, (tip_id, mcp_id) in control_fingers.items():
                     finger_id = f"{handedness.upper()}_{finger_name}"
-                    mcp_pos_y = landmarks[mcp_id].y
-                    tip_pos_y = landmarks[tip_id].y
+                    mcp_pos = landmarks[mcp_id]
+                    tip_pos = landmarks[tip_id]
 
-                    # Update history
+                    # Calculate current finger length (vertical distance)
+                    current_length = abs(mcp_pos.y - tip_pos.y)
+
+                    # Update history for MCP joint and finger length
                     if finger_id not in mcp_history:
                         mcp_history[finger_id] = deque(maxlen=CALIBRATION_FRAMES)
-                    mcp_history[finger_id].append(mcp_pos_y)
+                        finger_lengths[finger_id] = deque(maxlen=CALIBRATION_FRAMES)
+                    mcp_history[finger_id].append(mcp_pos.y)
+                    finger_lengths[finger_id].append(current_length)
 
-                    # NEW LOGIC: Calculate average as long as there's data
+                    # Calculate average as long as there's data
                     if len(mcp_history[finger_id]) > 0:
                         avg_mcp_y = sum(mcp_history[finger_id]) / len(mcp_history[finger_id])
-                        threshold_y = avg_mcp_y - THRESHOLD_OFFSET
-                        trigger_thresholds[finger_id] = threshold_y
+                        avg_length = sum(finger_lengths[finger_id]) / len(finger_lengths[finger_id])
 
-                        # LOGGING: Print calibration data
-                        print(
-                            f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] CALIBRATING {finger_id}: "
-                            f"History len={len(mcp_history[finger_id])}, AvgMCP_Y={avg_mcp_y:.2f}, Threshold_Y="
-                            f"{threshold_y:.2f}"
-                        )
+                        # NEW: Calculate offset relative to finger length
+                        dynamic_offset = avg_length * RELATIVE_THRESHOLD_PERCENT
+                        threshold_y = avg_mcp_y - dynamic_offset
+                        trigger_thresholds[finger_id] = threshold_y
 
                         # Update the finger's initial position relative to the threshold
                         if finger_id not in previous_finger_is_above:
-                            previous_finger_is_above[finger_id] = tip_pos_y < threshold_y
+                            previous_finger_is_above[finger_id] = tip_pos.y < threshold_y
 
     # Part 2: Only trigger key presses if controls are globally active
     if controls_active and results.multi_hand_landmarks:
