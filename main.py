@@ -1,114 +1,201 @@
 import cv2
 import mediapipe as mp
 import time
+from pyKey import press
 
 # --- Constants and Initialization ---
+
+# Control parameters
+COOLDOWN_SECONDS = 0.3  # Cooldown for twitch/fold actions. May need tuning.
 
 # MediaPipe Hands setup
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(
-    model_complexity=0,  # Use 0 for the lite model, 1 for the full model
+    model_complexity=0,
     max_num_hands=2,
     min_detection_confidence=0.7,
     min_tracking_confidence=0.7
 )
 mp_drawing = mp.solutions.drawing_utils
 
-# --- OpenCV VideoCapture setup ---
-# Explicitly request the DirectShow backend
+# OpenCV VideoCapture setup
 cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-# Then, attempt to set the desired FPS
 cap.set(cv2.CAP_PROP_FPS, 60)
 
-# FPS calculation variables
+# --- State Variables ---
+
+# FPS calculation
 prev_frame_time = 0
-new_frame_time = 0
 
-print("Starting Milestone 2: Gesture State Detection. Press 'ESC' to quit.")
+# Dictionaries to hold state information
+controls_active = False     # Global state for whether controls are on or off
+previous_finger_states = {} # Stores the last known extended state (True/False) for each finger
+last_key_press_time = {}    # Stores the timestamp of the last press for each key
+
+print("Starting Milestone 3 (Revised): Finger Fold Detection. Press 'ESC' to quit.")
+print("Ensure Crossy Road is the active window!")
 
 
-# --- Helper Function ---
+# --- Helper Functions ---
+
+def is_finger_extended(landmarks, tip_landmark, pip_landmark):
+    """Checks if a specific finger is extended."""
+    return landmarks[tip_landmark].y < landmarks[pip_landmark].y
+
 
 def is_peace_sign(hand_landmarks):
+    if not hand_landmarks:
+        return False
+    landmarks = hand_landmarks.landmark
+
+    index_extended = is_finger_extended(landmarks, mp_hands.HandLandmark.INDEX_FINGER_TIP,
+                                        mp_hands.HandLandmark.INDEX_FINGER_PIP)
+    middle_extended = is_finger_extended(landmarks, mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
+                                         mp_hands.HandLandmark.MIDDLE_FINGER_PIP)
+    ring_curled = not is_finger_extended(landmarks, mp_hands.HandLandmark.RING_FINGER_TIP,
+                                         mp_hands.HandLandmark.RING_FINGER_PIP)
+    pinky_curled = not is_finger_extended(landmarks, mp_hands.HandLandmark.PINKY_TIP, mp_hands.HandLandmark.PINKY_PIP)
+
+    return all([index_extended, middle_extended, ring_curled, pinky_curled])
+
+def is_control_gesture_active(hand_landmarks):
     """
-    Checks if a hand is making a peace sign based on landmark positions.
+    A more lenient check to see if the user is still in 'control mode'.
+    Requires only the ring and pinky fingers to be curled.
     """
     if not hand_landmarks:
         return False
-
-    # Landmark indices for fingertips and lower joints
-    # See MediaPipe documentation for the landmark map
     landmarks = hand_landmarks.landmark
 
-    # Check if Index and Middle fingers are extended (tip is above the joint below it)
-    index_finger_extended = landmarks[mp_hands.HandLandmark.INDEX_FINGER_TIP].y < landmarks[
-        mp_hands.HandLandmark.INDEX_FINGER_PIP].y
-    middle_finger_extended = landmarks[mp_hands.HandLandmark.MIDDLE_FINGER_TIP].y < landmarks[
-        mp_hands.HandLandmark.MIDDLE_FINGER_PIP].y
+    ring_curled = not is_finger_extended(landmarks, mp_hands.HandLandmark.RING_FINGER_TIP,
+                                         mp_hands.HandLandmark.RING_FINGER_PIP)
+    pinky_curled = not is_finger_extended(landmarks, mp_hands.HandLandmark.PINKY_TIP, mp_hands.HandLandmark.PINKY_PIP)
 
-    # Check if Ring and Pinky fingers are curled (tip is below the joint below it)
-    ring_finger_curled = landmarks[mp_hands.HandLandmark.RING_FINGER_TIP].y > landmarks[
-        mp_hands.HandLandmark.RING_FINGER_PIP].y
-    pinky_finger_curled = landmarks[mp_hands.HandLandmark.PINKY_TIP].y > landmarks[mp_hands.HandLandmark.PINKY_PIP].y
-
-    # A peace sign is when index and middle are up, and ring and pinky are down.
-    return all([index_finger_extended, middle_finger_extended, ring_finger_curled, pinky_finger_curled])
-
+    return ring_curled and pinky_curled
 
 # --- Main Loop ---
 
 while cap.isOpened():
     success, frame = cap.read()
     if not success:
-        print("Ignoring empty camera frame.")
         continue
 
     # --- Frame Processing ---
-
-    # Convert BGR to RGB for MediaPipe
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = hands.process(rgb_frame)
 
-    # --- Gesture Logic and Drawing ---
-    left_hand_status = "LEFT: NOT DETECTED"
-    right_hand_status = "RIGHT: NOT DETECTED"
-    controls_active = False
+    # --- State Management (NEW LOGIC)---
+
+    # Check the state of each hand
+    left_hand_in_position = False
+    right_hand_in_position = False
+    left_hand_landmarks = None
+    right_hand_landmarks = None
 
     if results.multi_hand_landmarks and results.multi_handedness:
-        # Loop through each detected hand
         for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
-            # Determine if the hand is left or right
             handedness = results.multi_handedness[i].classification[0].label
-
-            # Check for peace sign
-            is_peace = is_peace_sign(hand_landmarks)
-            status_text = f"{handedness.upper()}: PEACE" if is_peace else f"{handedness.upper()}: WAITING"
-
             if handedness == "Left":
-                left_hand_status = status_text
+                left_hand_landmarks = hand_landmarks
+                if controls_active:
+                    # Use the lenient check if controls are already on
+                    left_hand_in_position = is_control_gesture_active(hand_landmarks)
+                else:
+                    # Use the strict check to activate
+                    left_hand_in_position = is_peace_sign(hand_landmarks)
             else:  # Right
-                right_hand_status = status_text
+                right_hand_landmarks = hand_landmarks
+                if controls_active:
+                    right_hand_in_position = is_control_gesture_active(hand_landmarks)
+                else:
+                    right_hand_in_position = is_peace_sign(hand_landmarks)
 
-            # Draw the landmarks on the frame
-            mp_drawing.draw_landmarks(
-                image=frame,
-                landmark_list=hand_landmarks,
-                connections=mp_hands.HAND_CONNECTIONS,
-                landmark_drawing_spec=mp_drawing.DrawingSpec(color=(255, 0, 0), thickness=2, circle_radius=2),
-                connection_drawing_spec=mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2))
+    # Update the global controls_active state
+    if not controls_active and (left_hand_in_position and right_hand_in_position):
+        print("CONTROLS ACTIVATED")
+        controls_active = True
+        # Clear previous states to avoid false triggers on activation
+        previous_finger_states.clear()
+    elif controls_active and not (left_hand_in_position and right_hand_in_position):
+        print("CONTROLS DEACTIVATED")
+        controls_active = False
 
-    # --- FPS Calculation and Display ---
+    # --- Control Logic (NEW FOLD DETECTION) ---
+    if controls_active and results.multi_hand_landmarks:
+        current_time = time.time()
+
+        for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
+            handedness = results.multi_handedness[i].classification[0].label
+            landmarks = hand_landmarks.landmark
+
+            # Get current extended state of control fingers
+            index_is_extended = is_finger_extended(landmarks, mp_hands.HandLandmark.INDEX_FINGER_TIP,
+                                                   mp_hands.HandLandmark.INDEX_FINGER_PIP)
+            middle_is_extended = is_finger_extended(landmarks, mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
+                                                    mp_hands.HandLandmark.MIDDLE_FINGER_PIP)
+
+            # Define finger IDs for our state dictionary
+            right_index_id = 'RIGHT_INDEX'
+            right_middle_id = 'RIGHT_MIDDLE'
+            left_index_id = 'LEFT_INDEX'
+            left_middle_id = 'LEFT_MIDDLE'
+
+            if handedness == "Right":
+                # Check for UP action (index finger fold)
+                if previous_finger_states.get(right_index_id, True) and not index_is_extended:
+                    if (current_time - last_key_press_time.get('UP', 0)) > COOLDOWN_SECONDS:
+                        press('UP', 0.1)
+                        print("ACTION: UP")
+                        last_key_press_time['UP'] = current_time
+
+                # Check for DOWN action (middle finger fold)
+                if previous_finger_states.get(right_middle_id, True) and not middle_is_extended:
+                    if (current_time - last_key_press_time.get('DOWN', 0)) > COOLDOWN_SECONDS:
+                        press('DOWN', 0.1)
+                        print("ACTION: DOWN")
+                        last_key_press_time['DOWN'] = current_time
+
+                # Update previous states for right hand fingers
+                previous_finger_states[right_index_id] = index_is_extended
+                previous_finger_states[right_middle_id] = middle_is_extended
+
+            elif handedness == "Left":
+                # Check for RIGHT action (index finger fold)
+                if previous_finger_states.get(left_index_id, True) and not index_is_extended:
+                    if (current_time - last_key_press_time.get('RIGHT', 0)) > COOLDOWN_SECONDS:
+                        press('RIGHT', 0.1)
+                        print("ACTION: RIGHT")
+                        last_key_press_time['RIGHT'] = current_time
+
+                # Check for LEFT action (middle finger fold)
+                if previous_finger_states.get(left_middle_id, True) and not middle_is_extended:
+                    if (current_time - last_key_press_time.get('LEFT', 0)) > COOLDOWN_SECONDS:
+                        press('LEFT', 0.1)
+                        print("ACTION: LEFT")
+                        last_key_press_time['LEFT'] = current_time
+
+                # Update previous states for left hand fingers
+                previous_finger_states[left_index_id] = index_is_extended
+                previous_finger_states[left_middle_id] = middle_is_extended
+    else:
+        # If controls are not active, reset the finger states to avoid false triggers
+        previous_finger_states.clear()
+
+    # --- Visual Feedback ---
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+    status_text = "CONTROLS ACTIVE" if controls_active else "WAITING FOR GESTURE"
+    color = (0, 255, 0) if controls_active else (0, 255, 255)
+    cv2.putText(frame, status_text, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2, cv2.LINE_AA)
+
     new_frame_time = time.time()
-    fps = 1 / (new_frame_time - prev_frame_time)
+    fps = 1 / (new_frame_time - prev_frame_time) if (new_frame_time - prev_frame_time) > 0 else 0
     prev_frame_time = new_frame_time
     cv2.putText(frame, f"FPS: {int(fps)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
 
-    # --- Status Display ---
-    cv2.putText(frame, left_hand_status, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2, cv2.LINE_AA)
-    cv2.putText(frame, right_hand_status, (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2, cv2.LINE_AA)
-
-    # --- Display the Frame ---
-    cv2.imshow('Milestone 2 - Gesture Detection', frame)
+    cv2.imshow('CrossyVision Controller', frame)
 
     if cv2.waitKey(5) & 0xFF == 27:
         break
