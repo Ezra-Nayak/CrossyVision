@@ -92,7 +92,11 @@ class MediaPipeProcessor:
 # Control parameters
 COOLDOWN_SECONDS = 0.12          # Cooldown for individual finger presses.
 CALIBRATION_FRAMES = 500         # Number of frames to average for the trigger line (~1 second).
-RELATIVE_THRESHOLD_PERCENT = 0.9 # Trigger line is 40% of the way down from the MCP. Tune this for comfort.
+RELATIVE_THRESHOLD_PERCENT = 0.85 # Trigger line is 40% of the way down from the MCP. Tune this for comfort.
+
+# State stabilization parameters
+ACTIVATION_CONFIDENCE_FRAMES = 10  # Require 5 consecutive frames of correct gesture to activate.
+DEACTIVATION_CONFIDENCE_FRAMES = 25 # Require 5 consecutive frames of broken gesture to deactivate.
 
 # MediaPipe Hands setup
 mp_hands = mp.solutions.hands
@@ -126,6 +130,10 @@ mcp_history = {}            # Stores recent MCP joint Y-positions for averaging
 finger_lengths = {}         # Stores recent finger lengths for averaging
 trigger_thresholds = {}     # Stores the calculated trigger line Y-position for each finger
 previous_finger_is_above = {} # Stores the last known position relative to the trigger line
+
+# For state stabilization (debouncing)
+activation_counter = 0
+deactivation_counter = 0
 
 print("CrossyVision Controller Initialized. Press 'ESC' to quit.")
 print("Ensure Crossy Road is the active window!")
@@ -214,7 +222,8 @@ while True:
     if not reset_gesture_detected:
         left_hand_in_position = False
         right_hand_in_position = False
-        if results.multi_hand_landmarks:
+        if results.multi_hand_landmarks and len(results.multi_hand_landmarks) == 2:
+            # We need to see both hands to properly manage state
             for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
                 handedness = results.multi_handedness[i].classification[0].label
                 if handedness == "Left":
@@ -222,17 +231,32 @@ while True:
                         left_hand_in_position = is_control_gesture_active(hand_landmarks)
                     else:
                         left_hand_in_position = is_peace_sign(hand_landmarks)
-                else:
+                else:  # Right
                     if controls_active:
                         right_hand_in_position = is_control_gesture_active(hand_landmarks)
                     else:
                         right_hand_in_position = is_peace_sign(hand_landmarks)
-        if not controls_active and (left_hand_in_position and right_hand_in_position):
-            print("CONTROLS ACTIVATED")
-            controls_active = True
-        elif controls_active and not (left_hand_in_position and right_hand_in_position):
-            print("CONTROLS DEACTIVATED")
-            controls_active = False
+
+        both_hands_in_position = left_hand_in_position and right_hand_in_position
+
+        if not controls_active:
+            if both_hands_in_position:
+                activation_counter += 1
+                if activation_counter > ACTIVATION_CONFIDENCE_FRAMES:
+                    print("CONTROLS ACTIVATED")
+                    controls_active = True
+                    activation_counter = 0  # Reset counter
+            else:
+                activation_counter = 0  # Reset if gesture is broken
+        else:  # If controls are currently active
+            if not both_hands_in_position:
+                deactivation_counter += 1
+                if deactivation_counter > DEACTIVATION_CONFIDENCE_FRAMES:
+                    print("CONTROLS DEACTIVATED")
+                    controls_active = False
+                    deactivation_counter = 0  # Reset counter
+            else:
+                deactivation_counter = 0  # Reset if gesture is maintained
         if results.multi_hand_landmarks:
             for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
                 if is_control_gesture_active(hand_landmarks):
@@ -356,12 +380,12 @@ while True:
                     cv2.line(frame, (tip_pos[0] - 30, threshold_y_px), (tip_pos[0] + 30, threshold_y_px),
                              line_color, 2)
 
-                    # Draw the proximity bar on the transparent overlay
-                    cv2.rectangle(overlay, (tip_pos[0] - 5, tip_pos[1]), (tip_pos[0] + 5, threshold_y_px),
-                                  bar_color, -1)
+                    # Draw the proximity bar on the transparent overlay (thinner)
+                    cv2.rectangle(overlay, (tip_pos[0] - 2, tip_pos[1]), (tip_pos[0] + 2, threshold_y_px), bar_color,
+                                  -1)
 
-                    # Draw the fingertip aura
-                    cv2.circle(frame, tip_pos, 8, bar_color, 2)
+                    # Draw the fingertip aura (smaller)
+                    cv2.circle(frame, tip_pos, 5, bar_color, 2)
 
     # Blend the overlay with the main frame to create transparency effect
     alpha = 0.4  # Transparency factor
