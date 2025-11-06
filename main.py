@@ -31,7 +31,7 @@ while cap.isOpened():
 
     # 1. Flip the frame horizontally for a later selfie-view display.
     # This makes it feel like a mirror, which is more intuitive.
-    frame = cv2.flip(frame, 1)
+    # frame = cv2.flip(frame, 1)
 
     # 2. Convert the BGR image to RGB. MediaPipe requires RGB.
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
