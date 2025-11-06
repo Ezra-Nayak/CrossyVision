@@ -192,10 +192,18 @@ class FaceMasker:
 
             if roi_h > 0 and roi_w > 0:
                 mask_resized = cv2.resize(self.mask_image, (roi_w, roi_h))
-                # Opaque image logic: simply replace the region
+
+                # --- Handle Grayscale Masks ---
+                # If the mask image is grayscale (shape has only 2 dimensions),
+                # convert it to 3-channel BGR to make it compatible with the frame.
+                if len(mask_resized.shape) == 2:
+                    mask_resized = cv2.cvtColor(mask_resized, cv2.COLOR_GRAY2BGR)
+
+                # --- Blending/Overlay Logic ---
+                # Opaque image logic (3 channels)
                 if mask_resized.shape[2] != 4:
                     frame[y1:y2, x1:x2] = mask_resized
-                # Transparent image logic
+                # Transparent image logic (4 channels)
                 else:
                     roi = frame[y1:y2, x1:x2]
                     mask_bgr = mask_resized[:, :, :3]
