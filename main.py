@@ -410,8 +410,14 @@ while True:
                         if finger_id not in mcp_history:
                             mcp_history[finger_id] = deque(maxlen=CALIBRATION_FRAMES)
                             finger_lengths[finger_id] = deque(maxlen=CALIBRATION_FRAMES)
-                        mcp_history[finger_id].append(mcp_pos.y)
-                        finger_lengths[finger_id].append(current_length)
+
+                            # --- Conditional Calibration ---
+                            # Only update the calibration history if the finger is in the "ready" state (above the line).
+                            # This prevents the trigger line from drifting downwards during rapid presses.
+                        if previous_finger_is_above.get(finger_id, True):
+                            mcp_history[finger_id].append(mcp_pos.y)
+                            finger_lengths[finger_id].append(current_length)
+
                         if len(mcp_history[finger_id]) > 0:
                             avg_mcp_y = sum(mcp_history[finger_id]) / len(mcp_history[finger_id])
                             avg_length = sum(finger_lengths[finger_id]) / len(finger_lengths[finger_id])
