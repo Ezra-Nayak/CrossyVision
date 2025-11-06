@@ -6,11 +6,19 @@ import time
 
 # MediaPipe Hands setup
 mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.7, min_tracking_confidence=0.7)
+hands = mp_hands.Hands(
+    model_complexity=0,  # Use 0 for the lite model, 1 for the full model
+    max_num_hands=2,
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.7
+)
 mp_drawing = mp.solutions.drawing_utils
 
-# OpenCV VideoCapture setup
-cap = cv2.VideoCapture(0)
+# --- OpenCV VideoCapture setup ---
+# Explicitly request the DirectShow backend
+cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+# Then, attempt to set the desired FPS
+cap.set(cv2.CAP_PROP_FPS, 60)
 
 # FPS calculation variables
 prev_frame_time = 0
