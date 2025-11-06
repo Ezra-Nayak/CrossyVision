@@ -3,18 +3,19 @@ import mediapipe as mp
 import time
 from pyKey import press
 from collections import deque
-import datetime
+import threading
 
 # --- Constants and Initialization ---
 
 # Control parameters
 COOLDOWN_SECONDS = 0.12          # Cooldown for individual finger presses.
-CALIBRATION_FRAMES = 60         # Number of frames to average for the trigger line (~1 second).
+CALIBRATION_FRAMES = 70         # Number of frames to average for the trigger line (~1 second).
 RELATIVE_THRESHOLD_PERCENT = 0.9 # Trigger line is 40% of the way down from the MCP. Tune this for comfort.
 
 # MediaPipe Hands setup
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(
+    static_image_mode = False,
     model_complexity=1,
     max_num_hands=2,
     min_detection_confidence=0.7,
@@ -81,6 +82,12 @@ def is_high_five(hand_landmarks):
     pinky_extended = is_finger_extended(landmarks, mp_hands.HandLandmark.PINKY_TIP, mp_hands.HandLandmark.PINKY_PIP)
     return all([thumb_extended, index_extended, middle_extended, ring_extended, pinky_extended])
 
+def press_key_threaded(key, duration):
+    """
+    Presses a key in a separate thread to avoid blocking the main loop.
+    """
+    press(key, duration)
+
 # --- Main Loop ---
 
 while cap.isOpened():
@@ -117,7 +124,8 @@ while cap.isOpened():
         if left_peace_right_five or right_peace_left_five:
             reset_gesture_detected = True
             if (current_time - last_key_press_time.get('SPACEBAR', 0)) > 1.0:
-                press('SPACEBAR', 0.05)
+                # Launch the key press in a non-blocking thread
+                threading.Thread(target=press_key_threaded, args=('SPACEBAR', 0.05), daemon=True).start()
                 print("--- ACTION: SPACEBAR (Restart) ---")
                 last_key_press_time['SPACEBAR'] = current_time
 
@@ -202,7 +210,9 @@ while cap.isOpened():
                         finger_was_previously_above = previous_finger_is_above.get(finger_id, True)
                         if finger_was_previously_above and not finger_is_currently_above:
                             if (current_time - last_key_press_time.get(key_action, 0)) > COOLDOWN_SECONDS:
-                                press(key_action, 0.05)
+                                # Launch the key press in a non-blocking thread
+                                threading.Thread(target=press_key_threaded, args=(key_action, 0.05),
+                                                 daemon=True).start()
                                 print(f"--- ACTION: {key_action} ---")
                                 last_key_press_time[key_action] = current_time
                         previous_finger_is_above[finger_id] = finger_is_currently_above
