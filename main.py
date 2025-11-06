@@ -5,6 +5,7 @@ from pyKey import press
 from collections import deque
 import threading
 from threading import Thread
+import numpy as np
 
 class WebcamVideoStream:
     """
@@ -280,35 +281,96 @@ while True:
     else:
         controls_active = False
 
-    # --- Visual Feedback ---
-    # (This section is also now inside the new main loop)
+    # --- Visual Feedback (Energy Tether) ---
+
+    # Create a transparent overlay to draw the tether bars on
+    overlay = frame.copy()
+
+    # Define the specific connections for the two control fingers
+    FINGER_CONNECTIONS = [
+        (mp_hands.HandLandmark.INDEX_FINGER_MCP, mp_hands.HandLandmark.INDEX_FINGER_PIP),
+        (mp_hands.HandLandmark.INDEX_FINGER_PIP, mp_hands.HandLandmark.INDEX_FINGER_DIP),
+        (mp_hands.HandLandmark.INDEX_FINGER_DIP, mp_hands.HandLandmark.INDEX_FINGER_TIP),
+        (mp_hands.HandLandmark.MIDDLE_FINGER_MCP, mp_hands.HandLandmark.MIDDLE_FINGER_PIP),
+        (mp_hands.HandLandmark.MIDDLE_FINGER_PIP, mp_hands.HandLandmark.MIDDLE_FINGER_DIP),
+        (mp_hands.HandLandmark.MIDDLE_FINGER_DIP, mp_hands.HandLandmark.MIDDLE_FINGER_TIP),
+    ]
+
     if results.multi_hand_landmarks:
         for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
-            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
             handedness = results.multi_handedness[i].classification[0].label
             landmarks = hand_landmarks.landmark
+
+            # --- 1. Draw the selective skeleton ---
+            # Convert normalized landmarks to pixel coordinates
+            pixel_landmarks = {idx: (int(lm.x * frame_width), int(lm.y * frame_height)) for idx, lm in
+                               enumerate(landmarks)}
+
+            # Draw connections
+            for connection in FINGER_CONNECTIONS:
+                start_idx, end_idx = connection
+                if start_idx in pixel_landmarks and end_idx in pixel_landmarks:
+                    cv2.line(frame, pixel_landmarks[start_idx], pixel_landmarks[end_idx], (255, 255, 255), 2)
+
+            # Draw landmarks (joints) for those fingers
+            for conn in FINGER_CONNECTIONS:
+                for idx in conn:
+                    cv2.circle(frame, pixel_landmarks[idx], 3, (0, 0, 255), -1)
+
+            # --- 2. Draw the Energy Tethers ---
             control_fingers_vis = {"INDEX": mp_hands.HandLandmark.INDEX_FINGER_TIP,
                                    "MIDDLE": mp_hands.HandLandmark.MIDDLE_FINGER_TIP}
             for finger_name, tip_id in control_fingers_vis.items():
                 finger_id = f"{handedness.upper()}_{finger_name}"
-                if finger_id in trigger_thresholds:
-                    threshold_y_pixels = int(trigger_thresholds[finger_id] * frame_height)
-                    tip_pos_x_pixels = int(landmarks[tip_id].x * frame_width)
-                    is_above = previous_finger_is_above.get(finger_id, True)
-                    line_color = (0, 255, 0) if is_above else (0, 0, 255)
-                    cv2.line(frame, (tip_pos_x_pixels - 30, threshold_y_pixels),
-                             (tip_pos_x_pixels + 30, threshold_y_pixels), line_color, 2)
 
-    status_text = "CONTROLS ACTIVE" if controls_active else "WAITING FOR GESTURE"
-    color = (0, 255, 0) if controls_active else (0, 255, 255)
-    cv2.putText(frame, status_text, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2, cv2.LINE_AA)
+                if finger_id in trigger_thresholds:
+                    # Define colors
+                    CYAN = (255, 255, 0)
+                    YELLOW = (0, 255, 255)
+                    RED = (0, 0, 255)
+                    GREEN = (0, 255, 0)
+
+                    # Get key positions in pixels
+                    threshold_y_px = int(trigger_thresholds[finger_id] * frame_height)
+                    tip_pos = pixel_landmarks[tip_id]
+                    mcp_id = mp_hands.HandLandmark[f"{finger_name}_FINGER_MCP"]
+                    mcp_pos = pixel_landmarks[mcp_id]
+
+                    is_above = previous_finger_is_above.get(finger_id, True)
+
+                    # Determine colors based on state
+                    if is_above:
+                        # Calculate proximity for color gradient
+                        total_dist = abs(mcp_pos[1] - threshold_y_px)
+                        current_dist = abs(tip_pos[1] - threshold_y_px)
+                        proximity = max(0, min(1, current_dist / total_dist if total_dist > 0 else 0))
+
+                        # Interpolate color from Cyan (far) to Yellow (close)
+                        bar_color = [int(c1 * proximity + c2 * (1 - proximity)) for c1, c2 in zip(CYAN, YELLOW)]
+                        line_color = GREEN
+                    else:
+                        bar_color = RED
+                        line_color = RED
+
+                    # Draw the main trigger line
+                    cv2.line(frame, (tip_pos[0] - 30, threshold_y_px), (tip_pos[0] + 30, threshold_y_px),
+                             line_color, 2)
+
+                    # Draw the proximity bar on the transparent overlay
+                    cv2.rectangle(overlay, (tip_pos[0] - 5, tip_pos[1]), (tip_pos[0] + 5, threshold_y_px),
+                                  bar_color, -1)
+
+                    # Draw the fingertip aura
+                    cv2.circle(frame, tip_pos, 8, bar_color, 2)
+
+    # Blend the overlay with the main frame to create transparency effect
+    alpha = 0.4  # Transparency factor
+    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+
+    # We are no longer drawing any text
     new_frame_time = time.time()
-    # Calculate the raw, unlocked display FPS
-    raw_fps = 1 / (new_frame_time - prev_frame_time) if (new_frame_time - prev_frame_time) > 0 else 0
     prev_frame_time = new_frame_time
-    # Cap the displayed FPS at a realistic 60, as the camera is the true source
-    fps = min(raw_fps, 60.0)
-    cv2.putText(frame, f"FPS: {int(fps)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+
     cv2.imshow('CrossyVision Controller', frame)
 
     if cv2.waitKey(1) & 0xFF == 27:
