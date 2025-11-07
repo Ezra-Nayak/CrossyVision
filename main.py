@@ -331,14 +331,10 @@ deactivation_counter = 0
 # --- TUI Elements ---
 # Create progress bars for each finger
 progress_bars = {
-    "LEFT_INDEX": Progress(TextColumn("{task.description}"), BarColumn(bar_width=None),
-                           TextColumn("{task.percentage:>3.0f}%"), console=console),
-    "LEFT_MIDDLE": Progress(TextColumn("{task.description}"), BarColumn(bar_width=None),
-                            TextColumn("{task.percentage:>3.0f}%"), console=console),
-    "RIGHT_INDEX": Progress(TextColumn("{task.description}"), BarColumn(bar_width=None),
-                            TextColumn("{task.percentage:>3.0f}%"), console=console),
-    "RIGHT_MIDDLE": Progress(TextColumn("{task.description}"), BarColumn(bar_width=None),
-                             TextColumn("{task.percentage:>3.0f}%"), console=console),
+    "LEFT_INDEX": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None), console=console),
+    "LEFT_MIDDLE": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None), console=console),
+    "RIGHT_INDEX": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None), console=console),
+    "RIGHT_MIDDLE": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None), console=console),
 }
 # Add tasks to the progress bars
 progress_tasks = {
@@ -617,16 +613,11 @@ with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
         cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
 
         # --- TUI Update ---
-        new_frame_time = time.time()
-        if (new_frame_time - prev_frame_time) > 0:
-            fps = 1 / (new_frame_time - prev_frame_time)
-        prev_frame_time = new_frame_time
 
         # Update Header
-        status_text = Text("CONTROLS ACTIVE", style="bold green") if controls_active else Text("CONTROLS INACTIVE",
-                                                                                               style="bold red")
-        header_text = Text.assemble(status_text, Text(f" | FPS: {fps:.1f}", justify="right"))
-        layout["header"].update(Panel(header_text, title="CrossyVision Controller", border_style="blue"))
+        status_text = Text("CONTROLS ACTIVE", style="bold green", justify="center") if controls_active else Text(
+            "CONTROLS INACTIVE", style="bold red", justify="center")
+        layout["header"].update(Panel(status_text, title="CrossyVision Controller", border_style="blue"))
 
         # Update Finger Progress Bars
         if results.multi_hand_landmarks:
@@ -635,27 +626,45 @@ with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
                 landmarks = hand_landmarks.landmark
                 for finger_name in ["INDEX", "MIDDLE"]:
                     finger_id = f"{handedness.upper()}_{finger_name}"
-                    if finger_id in trigger_thresholds:
-                        mcp_y = landmarks[mp_hands.HandLandmark[f"{finger_name}_FINGER_MCP"]].y
-                        tip_y = landmarks[mp_hands.HandLandmark[f"{finger_name}_FINGER_TIP"]].y
-                        threshold_y = trigger_thresholds[finger_id]
 
-                        total_dist = abs(mcp_y - threshold_y)
-                        current_dist_from_mcp = abs(mcp_y - tip_y)
+                    # Ensure we have calibration data for this finger
+                    if finger_id in trigger_thresholds and finger_id in mcp_history and len(mcp_history[finger_id]) > 0:
+                        # --- New Progress Calculation ---
+                        # Get current calibration averages
+                        avg_mcp_y = sum(mcp_history[finger_id]) / len(mcp_history[finger_id])
+                        avg_length = sum(finger_lengths[finger_id]) / len(finger_lengths[finger_id])
+
+                        # Define the start (0%) and end (100%) points of the gesture
+                        y_extended_tip = avg_mcp_y - avg_length  # Furthest point = 0%
+                        y_activation = trigger_thresholds[finger_id]  # Activation line = 100%
+
+                        # Get current finger position
+                        y_current_tip = landmarks[mp_hands.HandLandmark[f"{finger_name}_FINGER_TIP"]].y
+
+                        # Calculate progress
+                        total_travel_dist = y_activation - y_extended_tip
+                        current_travel = y_current_tip - y_extended_tip
 
                         progress_val = 0
-                        if total_dist > 1e-6:  # Avoid division by zero
-                            progress_val = min(100, max(0, (current_dist_from_mcp / total_dist) * 100))
+                        if total_travel_dist > 1e-6:  # Avoid division by zero
+                            progress_val = (current_travel / total_travel_dist) * 100
 
-                        is_above = previous_finger_is_above.get(finger_id, True)
+                        # Clamp the value between 0 and 100
+                        progress_val = min(100, max(0, progress_val))
+
+                        # --- Update TUI Element ---
+                        is_activated = not previous_finger_is_above.get(finger_id, True)
                         bar = progress_bars[finger_id]
                         task_id = progress_tasks[finger_id]
 
                         # Change bar color based on activation state
-                        if not is_above:
-                            bar.columns[1].style = "red"  # BarColumn
+                        bar_column = bar.columns[1]  # The BarColumn is the second column
+                        if is_activated:
+                            bar_column.style = "white on red"
+                            bar_column.complete_style = "white on red"
                         else:
-                            bar.columns[1].style = "cyan"
+                            bar_column.style = "cyan"
+                            bar_column.complete_style = "cyan"
 
                         bar.update(task_id, completed=progress_val)
 
