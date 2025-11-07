@@ -8,8 +8,7 @@ from threading import Thread
 import numpy as np
 
 # --- Rich TUI Imports ---
-from collections import deque
-from rich.console import Console
+from rich.console import Console, Group
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
@@ -17,32 +16,19 @@ from rich.progress import Progress, BarColumn, TextColumn
 from rich.columns import Columns
 from rich.text import Text
 import logging
-import time # Required for custom log timestamp
 
-# --- Rich TUI Setup ---
+# --- Standard Logging & TUI Setup ---
+# Configure a standard logger to print startup/error messages to the console.
+# This will appear in the terminal before the Rich Live TUI takes over the screen.
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s - %(levelname)s] %(message)s",
+    datefmt="%X"
+)
+log = logging.getLogger(__name__)
+
+# Rich Console for the TUI
 console = Console()
-log_deque = deque(maxlen=8) # Store the last 8 log messages
-
-# Custom handler to append logs to our deque
-class DequeHandler(logging.Handler):
-    def __init__(self, deque_instance):
-        super().__init__()
-        self.deque_instance = deque_instance
-
-    def emit(self, record):
-        # Format the message with a timestamp
-        log_entry = f"[{time.strftime('%X')}] {record.getMessage()}"
-        self.deque_instance.append(log_entry)
-
-# Configure the specific logger we will use to send messages to the TUI
-log = logging.getLogger("tui_logger")
-log.setLevel(logging.INFO)
-log.addHandler(DequeHandler(log_deque))
-log.propagate = False # Prevent TUI messages from appearing on stderr
-
-# Configure basicConfig for any other module's logging (like MediaPipe's warnings)
-# This will print them to stderr without interfering with the Rich Live display.
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(name)s: %(message)s")
 
 
 class WebcamVideoStream:
@@ -55,6 +41,8 @@ class WebcamVideoStream:
         # Initialize the video camera stream and read the first frame
         self.stream = cv2.VideoCapture(src, cv2.CAP_DSHOW)
         self.stream.set(cv2.CAP_PROP_FPS, 60)
+        self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         (self.grabbed, self.frame) = self.stream.read()
 
         # A flag to indicate if the thread should be stopped
@@ -295,7 +283,6 @@ if MASK_FACE:
         MASK_FACE = False
 
 # --- Threaded Setup ---
-log.info("Starting threaded services...")
 # Start the camera stream thread
 vs = WebcamVideoStream(src=0).start()
 # Start the MediaPipe processing thread
@@ -308,6 +295,14 @@ if MASK_FACE:
 time.sleep(2.0)  # Allow services to warm up
 
 # --- State Variables ---
+
+# Action History Display
+# We will dynamically trim these based on console width later
+left_hand_actions = deque(maxlen=40)
+right_hand_actions = deque(maxlen=40)
+action_symbols = {
+    "UP": "↑", "DOWN": "↓", "LEFT": "←", "RIGHT": "→", "SPACEBAR": "↺"
+}
 
 # FPS calculation
 prev_frame_time = 0
@@ -329,19 +324,19 @@ activation_counter = 0
 deactivation_counter = 0
 
 # --- TUI Elements ---
-# Create progress bars for each finger
+# Create progress bars for each finger using a thick block style
 progress_bars = {
-    "LEFT_INDEX": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None), console=console),
-    "LEFT_MIDDLE": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None), console=console),
-    "RIGHT_INDEX": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None), console=console),
-    "RIGHT_MIDDLE": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None), console=console),
+    "LEFT_INDEX": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
+    "LEFT_MIDDLE": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
+    "RIGHT_INDEX": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
+    "RIGHT_MIDDLE": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
 }
 # Add tasks to the progress bars
 progress_tasks = {
-    "LEFT_INDEX": progress_bars["LEFT_INDEX"].add_task("[cyan]UP (Index)  ", total=100),
-    "LEFT_MIDDLE": progress_bars["LEFT_MIDDLE"].add_task("[cyan]DOWN (Middle)", total=100),
-    "RIGHT_INDEX": progress_bars["RIGHT_INDEX"].add_task("[cyan]LEFT (Index) ", total=100),
-    "RIGHT_MIDDLE": progress_bars["RIGHT_MIDDLE"].add_task("[cyan]RIGHT (Middle)", total=100),
+    "LEFT_INDEX": progress_bars["LEFT_INDEX"].add_task("[cyan]RIGHT (Index)  ", total=100),
+    "LEFT_MIDDLE": progress_bars["LEFT_MIDDLE"].add_task("[cyan]LEFT (Middle)", total=100),
+    "RIGHT_INDEX": progress_bars["RIGHT_INDEX"].add_task("[cyan]UP (Index) ", total=100),
+    "RIGHT_MIDDLE": progress_bars["RIGHT_MIDDLE"].add_task("[cyan]DOWN (Middle)", total=100),
 }
 
 log.info("CrossyVision Controller Initialized. Press 'ESC' to quit.")
@@ -409,14 +404,13 @@ layout = Layout()
 layout.split(
     Layout(name="header", size=3),
     Layout(ratio=1, name="main"),
-    Layout(size=10, name="footer"),
 )
 layout["main"].split_row(Layout(name="left"), Layout(name="right"))
 
 # Set up the OpenCV window to be resizable and smaller
 WINDOW_NAME = 'CrossyVision Controller'
 cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-cv2.resizeWindow(WINDOW_NAME, 800, 600)  # Width, Height
+cv2.resizeWindow(WINDOW_NAME, 768, 432) # Width, Height
 
 with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
     while True:
@@ -452,7 +446,9 @@ with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
                 reset_gesture_detected = True
                 if (current_time - last_key_press_time.get('SPACEBAR', 0)) > 1.0:
                     threading.Thread(target=press_key_threaded, args=('SPACEBAR', 0.05), daemon=True).start()
-                    log.info("--- ACTION: SPACEBAR (Restart) ---")
+                    # A restart clears the action history
+                    left_hand_actions.clear()
+                    right_hand_actions.clear()
                     last_key_press_time['SPACEBAR'] = current_time
 
         if not reset_gesture_detected:
@@ -552,7 +548,14 @@ with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
                                 if (current_time - last_key_press_time.get(key_action, 0)) > COOLDOWN_SECONDS:
                                     threading.Thread(target=press_key_threaded, args=(key_action, 0.05),
                                                      daemon=True).start()
-                                    log.info(f"--- ACTION: {key_action} ---")
+
+                                    # Append the action symbol to the correct deque
+                                    symbol = action_symbols.get(key_action, "?")
+                                    if handedness == "Left":
+                                        left_hand_actions.append(symbol)
+                                    else:  # Right
+                                        right_hand_actions.append(symbol)
+
                                     last_key_press_time[key_action] = current_time
                             previous_finger_is_above[finger_id] = finger_is_currently_above
         else:
@@ -660,25 +663,27 @@ with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
                         # Change bar color based on activation state
                         bar_column = bar.columns[1]  # The BarColumn is the second column
                         if is_activated:
-                            bar_column.style = "white on red"
-                            bar_column.complete_style = "white on red"
+                            # When activated, make the filled part of the bar red
+                            bar_column.complete_style = "red"
                         else:
-                            bar_column.style = "cyan"
+                            # When not activated, use the default cyan color
                             bar_column.complete_style = "cyan"
 
                         bar.update(task_id, completed=progress_val)
 
-        # Update Panels
-        left_panel_content = Columns([progress_bars["LEFT_INDEX"], progress_bars["LEFT_MIDDLE"]], expand=True,
-                                     equal=True)
-        right_panel_content = Columns([progress_bars["RIGHT_INDEX"], progress_bars["RIGHT_MIDDLE"]], expand=True,
-                                      equal=True)
-        layout["left"].update(Panel(left_panel_content, title="Left Hand"))
-        layout["right"].update(Panel(right_panel_content, title="Right Hand"))
+        # --- Update Hand Panels with Action History ---
 
-        # Update Footer Log
-        log_text = Text("\n".join(log_deque), no_wrap=True)
-        layout["footer"].update(Panel(log_text, title="Log", border_style="blue"))
+        # Left Hand Panel
+        left_progress_group = Group(progress_bars["LEFT_INDEX"], progress_bars["LEFT_MIDDLE"])
+        left_action_text = Text(" ".join(left_hand_actions), justify="right", no_wrap=True)
+        left_panel_content = Group(left_progress_group, "\n", left_action_text)
+        layout["left"].update(Panel(left_panel_content, title="Left Hand", border_style="blue"))
+
+        # Right Hand Panel
+        right_progress_group = Group(progress_bars["RIGHT_INDEX"], progress_bars["RIGHT_MIDDLE"])
+        right_action_text = Text(" ".join(right_hand_actions), justify="left", no_wrap=True)
+        right_panel_content = Group(right_progress_group, "\n", right_action_text)
+        layout["right"].update(Panel(right_panel_content, title="Right Hand", border_style="blue"))
 
         cv2.imshow(WINDOW_NAME, frame)
 
