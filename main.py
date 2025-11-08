@@ -18,13 +18,8 @@ from rich.text import Text
 import logging
 
 # --- Standard Logging & TUI Setup ---
-# Configure a standard logger to print startup/error messages to the console.
-# This will appear in the terminal before the Rich Live TUI takes over the screen.
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s - %(levelname)s] %(message)s",
-    datefmt="%X"
-)
+# Configure a standard logger but set its level to CRITICAL to silence INFO/WARNING.
+logging.basicConfig(level=logging.CRITICAL)
 log = logging.getLogger(__name__)
 
 # Rich Console for the TUI
@@ -297,9 +292,9 @@ time.sleep(2.0)  # Allow services to warm up
 # --- State Variables ---
 
 # Action History Display
-# We will dynamically trim these based on console width later
-left_hand_actions = deque(maxlen=40)
-right_hand_actions = deque(maxlen=40)
+# The maxlen will be set dynamically inside the main loop
+left_hand_actions = deque()
+right_hand_actions = deque()
 action_symbols = {
     "UP": "↑", "DOWN": "↓", "LEFT": "←", "RIGHT": "→", "SPACEBAR": "↺"
 }
@@ -338,8 +333,6 @@ progress_tasks = {
     "RIGHT_INDEX": progress_bars["RIGHT_INDEX"].add_task("[cyan]UP (Index) ", total=100),
     "RIGHT_MIDDLE": progress_bars["RIGHT_MIDDLE"].add_task("[cyan]DOWN (Middle)", total=100),
 }
-
-log.info("CrossyVision Controller Initialized. Press 'ESC' to quit.")
 
 
 # --- Helper Functions ---
@@ -671,17 +664,51 @@ with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
 
                         bar.update(task_id, completed=progress_val)
 
-        # --- Update Hand Panels with Action History ---
+        # --- Dynamically Update Hand Panels and Action History ---
 
-        # Left Hand Panel
+        # Calculate the available width for text inside each panel
+        available_width = (console.width // 2) - 4  # Account for panel border/padding
+        max_symbols = max(1, available_width // 2)  # Each symbol takes 2 chars (symbol + space)
+
+        # Dynamically trim the deques to the visible size
+        while len(left_hand_actions) > max_symbols:
+            left_hand_actions.popleft()
+        while len(right_hand_actions) > max_symbols:
+            right_hand_actions.popleft()
+
+        # Define the color fade effect: brightest for newest, dimmest for oldest
+        fade_styles = ["bright_white", "white", "grey82", "grey66", "grey50", "grey37", "grey23"]
+        num_styles = len(fade_styles)
+
+        # --- Build Styled Text for Left Hand ---
+        left_action_text = Text(justify="right", no_wrap=True)
+        left_history = list(left_hand_actions)
+        for i, symbol in enumerate(left_history):
+            # "Age" is how far from the end of the list the item is (0 = newest)
+            age = len(left_history) - 1 - i
+            # Clamp the age to the number of styles we have
+            style_index = min(age, num_styles - 1)
+            # The newest item gets the first, brightest style in the list
+            final_style = fade_styles[style_index]
+            left_action_text.append(symbol + " ", style=final_style)
+
+        # --- Build Styled Text for Right Hand ---
+        right_action_text = Text(justify="left", no_wrap=True)
+        right_history = list(right_hand_actions)
+        # Iterate in REVERSE to place the newest (brightest) item on the left
+        for i, symbol in enumerate(reversed(right_history)):
+            # In a reversed list, the index 'i' is the age (0 = newest)
+            age = i
+            style_index = min(age, num_styles - 1)
+            final_style = fade_styles[style_index]
+            right_action_text.append(symbol + " ", style=final_style)
+
+        # --- Update Panels with new styled text ---
         left_progress_group = Group(progress_bars["LEFT_INDEX"], progress_bars["LEFT_MIDDLE"])
-        left_action_text = Text(" ".join(left_hand_actions), justify="right", no_wrap=True)
         left_panel_content = Group(left_progress_group, "\n", left_action_text)
         layout["left"].update(Panel(left_panel_content, title="Left Hand", border_style="blue"))
 
-        # Right Hand Panel
         right_progress_group = Group(progress_bars["RIGHT_INDEX"], progress_bars["RIGHT_MIDDLE"])
-        right_action_text = Text(" ".join(right_hand_actions), justify="left", no_wrap=True)
         right_panel_content = Group(right_progress_group, "\n", right_action_text)
         layout["right"].update(Panel(right_panel_content, title="Right Hand", border_style="blue"))
 
