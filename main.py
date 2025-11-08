@@ -16,10 +16,10 @@ from rich.panel import Panel
 from rich.progress import Progress, BarColumn, TextColumn
 from rich.columns import Columns
 from rich.text import Text
+from rich.box import ROUNDED
 import logging
 
 # --- Standard Logging & TUI Setup ---
-# Configure a standard logger but set its level to CRITICAL to silence INFO/WARNING.
 logging.basicConfig(level=logging.CRITICAL)
 log = logging.getLogger(__name__)
 
@@ -34,52 +34,39 @@ class WebcamVideoStream:
     """
 
     def __init__(self, src=0):
-        # Initialize the video camera stream and read the first frame
         self.stream = cv2.VideoCapture(src, cv2.CAP_DSHOW)
         self.stream.set(cv2.CAP_PROP_FPS, 60)
         self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         (self.grabbed, self.frame) = self.stream.read()
-
-        # A flag to indicate if the thread should be stopped
         self.stopped = False
 
     def start(self):
-        # Start the thread to read frames from the video stream
         Thread(target=self.update, args=()).start()
         return self
 
     def update(self):
-        # Keep looping infinitely until the thread is stopped
         while True:
-            # If the thread indicator variable is set, stop the thread
             if self.stopped:
                 return
-
-            # Otherwise, read the next frame from the stream
             (self.grabbed, self.frame) = self.stream.read()
 
     def read(self):
-        # Return the frame most recently read
         return self.frame
 
     def stop(self):
-        # Indicate that the thread should be stopped
         self.stopped = True
 
 
 class MediaPipeProcessor:
     """
     A class to run MediaPipe hand processing in a dedicated thread.
-    It consumes frames from a WebcamVideoStream and produces annotated frames.
     """
 
     def __init__(self, stream, hands_instance):
         self.stream = stream
         self.hands = hands_instance
         self.stopped = False
-
-        # These will hold the latest processed results
         self.results = None
         self.output_frame = None
 
@@ -91,21 +78,14 @@ class MediaPipeProcessor:
         while True:
             if self.stopped:
                 return
-
-            # Get the latest frame from the camera thread
             frame = self.stream.read()
             if frame is None:
                 continue
-
-            # Process the frame
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             self.results = self.hands.process(rgb_frame)
-
-            # Store the frame that was used for this result
             self.output_frame = frame.copy()
 
     def read(self):
-        # Return the latest processed frame and its results
         return self.output_frame, self.results
 
     def stop(self):
@@ -114,24 +94,17 @@ class MediaPipeProcessor:
 
 class FaceMasker:
     """
-    Runs face detection and smoothing in a dedicated thread at a fixed rate (60 UPS)
-    to provide a stable, jitter-free overlay, independent of the main loop's frame rate.
+    Runs face detection and smoothing in a dedicated thread at 60 UPS.
     """
 
     def __init__(self, stream, mask_image):
-        self.stream = stream  # The WebcamVideoStream instance
+        self.stream = stream
         self.mask_image = mask_image
         self.stopped = False
-
-        # MediaPipe Face Detection setup
         self.face_detection = mp.solutions.face_detection.FaceDetection(model_selection=0,
                                                                         min_detection_confidence=0.5)
-
-        # State variables for smoothing and storing the final bbox
         self.smoothed_bbox = None
-        self.latest_bbox_for_overlay = None  # This will be read by the main thread
-
-        # Threading lock to prevent race conditions when accessing the bbox
+        self.latest_bbox_for_overlay = None
         self.lock = threading.Lock()
 
     def start(self):
@@ -139,22 +112,16 @@ class FaceMasker:
         return self
 
     def update(self):
-        """
-        This loop runs in its own thread, constantly detecting the face
-        and updating the smoothed bounding box at a fixed rate.
-        """
         updates_per_second = 60
         sleep_duration = 1.0 / updates_per_second
 
         while not self.stopped:
             start_time = time.time()
-
             frame = self.stream.read()
             if frame is None:
                 time.sleep(sleep_duration)
                 continue
 
-            # Process for faces
             face_frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             face_results = self.face_detection.process(face_frame_rgb)
             ih, iw, _ = frame.shape
@@ -166,14 +133,12 @@ class FaceMasker:
                 current_bbox = (int(bboxC.xmin * iw), int(bboxC.ymin * ih),
                                 int(bboxC.width * iw), int(bboxC.height * ih))
 
-            # --- Bounding Box Smoothing ---
             if current_bbox:
                 if self.smoothed_bbox is None:
                     self.smoothed_bbox = current_bbox
                 else:
                     x1, y1, w1, h1 = self.smoothed_bbox
                     x2, y2, w2, h2 = current_bbox
-                    # A more aggressive smoothing factor works better in a fixed-rate loop
                     smoothing = 0.1
                     new_x = int(x1 * (1 - smoothing) + x2 * smoothing)
                     new_y = int(y1 * (1 - smoothing) + y2 * smoothing)
@@ -181,19 +146,13 @@ class FaceMasker:
                     new_h = int(h1 * (1 - smoothing) + h2 * smoothing)
                     self.smoothed_bbox = (new_x, new_y, new_w, new_h)
 
-            # Safely update the bbox that the main thread will read
             with self.lock:
                 self.latest_bbox_for_overlay = self.smoothed_bbox
 
-            # Maintain the 60 UPS rate
             elapsed_time = time.time() - start_time
             time.sleep(max(0, sleep_duration - elapsed_time))
 
     def apply_mask(self, frame):
-        """
-        Called from the main loop to draw the mask on the frame
-        using the latest calculated bounding box.
-        """
         local_bbox = None
         with self.lock:
             if self.latest_bbox_for_overlay:
@@ -202,33 +161,22 @@ class FaceMasker:
         if local_bbox:
             ih, iw, _ = frame.shape
             x, y, w, h = local_bbox
-
-            # --- Expanded Bounding Box for Full Coverage ---
-            # Shift up significantly and expand to cover hair/forehead/chin
             x_new = x - int(w * 0.25)
-            y_new = y - int(h * 0.55)  # Shift up by ~55% of face height
-            w_new = int(w * 1.5)  # Make mask 50% wider than face
-            h_new = int(h * 1.8)  # Make mask 80% taller than face
+            y_new = y - int(h * 0.55)
+            w_new = int(w * 1.5)
+            h_new = int(h * 1.8)
 
             y1, y2 = max(0, y_new), min(ih, y_new + h_new)
             x1, x2 = max(0, x_new), min(iw, x_new + w_new)
-
             roi_h, roi_w = y2 - y1, x2 - x1
 
             if roi_h > 0 and roi_w > 0:
                 mask_resized = cv2.resize(self.mask_image, (roi_w, roi_h))
-
-                # --- Handle Grayscale Masks ---
-                # If the mask image is grayscale (shape has only 2 dimensions),
-                # convert it to 3-channel BGR to make it compatible with the frame.
                 if len(mask_resized.shape) == 2:
                     mask_resized = cv2.cvtColor(mask_resized, cv2.COLOR_GRAY2BGR)
 
-                # --- Blending/Overlay Logic ---
-                # Opaque image logic (3 channels)
                 if mask_resized.shape[2] != 4:
                     frame[y1:y2, x1:x2] = mask_resized
-                # Transparent image logic (4 channels)
                 else:
                     roi = frame[y1:y2, x1:x2]
                     mask_bgr = mask_resized[:, :, :3]
@@ -242,18 +190,14 @@ class FaceMasker:
 
 
 # --- Constants and Initialization ---
+COOLDOWN_SECONDS = 0.08
+FORCE_CALIBRATION_SECONDS = 2.0
+CALIBRATION_FRAMES = 1200
+RELATIVE_THRESHOLD_PERCENT = 0.85
 
-# Control parameters
-COOLDOWN_SECONDS = 0.08  # Cooldown for individual finger presses.
-FORCE_CALIBRATION_SECONDS = 2.0  # If finger is held down for this long, force recalibration.
-CALIBRATION_FRAMES = 1200  # Number of frames to average for the trigger line (~1 second).
-RELATIVE_THRESHOLD_PERCENT = 0.85  # Trigger line is 40% of the way down from the MCP. Tune this for comfort.
+ACTIVATION_CONFIDENCE_FRAMES = 10
+DEACTIVATION_CONFIDENCE_FRAMES = 25
 
-# State stabilization parameters
-ACTIVATION_CONFIDENCE_FRAMES = 10  # Require 5 consecutive frames of correct gesture to activate.
-DEACTIVATION_CONFIDENCE_FRAMES = 25  # Require 5 consecutive frames of broken gesture to deactivate.
-
-# MediaPipe Hands setup
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(
     static_image_mode=False,
@@ -265,9 +209,8 @@ hands = mp_hands.Hands(
 mp_drawing = mp.solutions.drawing_utils
 
 # --- Face Masking Setup ---
-MASK_FACE = True  # Set to False to disable face masking
+MASK_FACE = True
 
-# Load the mask image
 if MASK_FACE:
     try:
         mask_image = cv2.imread("mask.png", cv2.IMREAD_UNCHANGED)
@@ -279,73 +222,99 @@ if MASK_FACE:
         MASK_FACE = False
 
 # --- Threaded Setup ---
-# Start the camera stream thread
 vs = WebcamVideoStream(src=0).start()
-# Start the MediaPipe processing thread
 processor = MediaPipeProcessor(stream=vs, hands_instance=hands).start()
-# Start the Face Masking thread if enabled
 face_masker = None
 if MASK_FACE:
     face_masker = FaceMasker(stream=vs, mask_image=mask_image).start()
 
-time.sleep(2.0)  # Allow services to warm up
+time.sleep(2.0)
 
 # --- State Variables ---
-
-# Action History Display
-# The maxlen will be set dynamically inside the main loop
 left_hand_actions = deque()
 right_hand_actions = deque()
 action_symbols = {
-    "UP": "↑", "DOWN": "↓", "LEFT": "←", "RIGHT": "→", "SPACEBAR": "↺"
+    "UP": "↑", "DOWN": "↓", "LEFT": "←", "RIGHT": "→", "SPACEBAR": "␣"
 }
-# Dictionary to track which control fingers are currently detected on screen
 finger_presence = {}
 
-# FPS calculation
 prev_frame_time = 0
 new_frame_time = 0
 fps = 0
 
-# Dictionaries to hold state information
 controls_active = False
 last_key_press_time = {}
-# For dynamic thresholds
-mcp_history = {}  # Stores recent MCP joint Y-positions for averaging
-finger_lengths = {}  # Stores recent finger lengths for averaging
-trigger_thresholds = {}  # Stores the calculated trigger line Y-position for each finger
-previous_finger_is_above = {}  # Stores the last known position relative to the trigger line
-time_finger_went_below = {}  # For forced recalibration
+mcp_history = {}
+finger_lengths = {}
+trigger_thresholds = {}
+previous_finger_is_above = {}
+time_finger_went_below = {}
 
-# For state stabilization (debouncing)
 activation_counter = 0
 deactivation_counter = 0
 
 # --- TUI Elements ---
-
-# Define color schemes for actions
-action_styles = {"UP": "light_salmon1", "RIGHT": "light_salmon1", "DOWN": "light_slate_grey", "LEFT": "light_slate_grey"}
+action_styles = {"UP": "light_salmon1", "RIGHT": "light_salmon1", "DOWN": "light_slate_grey",
+                 "LEFT": "light_slate_grey"}
 symbol_to_action = {v: k for k, v in action_symbols.items()}
 
-# Create progress bars for each finger using a thick block style
+
+def create_key_display(symbol, action_name):
+    """Creates a nested bordered key display."""
+    # Inner panel with grey border
+    inner = Panel(
+        Text(symbol, justify="center", style=f"bold {action_styles[action_name]}"),
+        border_style="grey50",
+        box=ROUNDED,
+        padding=(0, 1),
+        expand=False
+    )
+    # Outer panel with white border
+    outer = Panel(
+        inner,
+        border_style="white",
+        box=ROUNDED,
+        padding=(0, 0),
+        expand=False
+    )
+    return outer
+
+
+# Create separate progress bars without the arrow in the description
 progress_bars = {
-    "LEFT_INDEX": Progress(TextColumn("{task.description}", justify="left"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
-    "LEFT_MIDDLE": Progress(TextColumn("{task.description}", justify="left"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
-    "RIGHT_INDEX": Progress(TextColumn("{task.description}", justify="left"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
-    "RIGHT_MIDDLE": Progress(TextColumn("{task.description}", justify="left"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
+    "LEFT_INDEX": Progress(
+        BarColumn(bar_width=None, style="grey30", complete_style=action_styles['RIGHT']),
+        console=console,
+        expand=True
+    ),
+    "LEFT_MIDDLE": Progress(
+        BarColumn(bar_width=None, style="grey30", complete_style=action_styles['LEFT']),
+        console=console,
+        expand=True
+    ),
+    "RIGHT_INDEX": Progress(
+        BarColumn(bar_width=None, style="grey30", complete_style=action_styles['UP']),
+        console=console,
+        expand=True
+    ),
+    "RIGHT_MIDDLE": Progress(
+        BarColumn(bar_width=None, style="grey30", complete_style=action_styles['DOWN']),
+        console=console,
+        expand=True
+    ),
 }
-# Add tasks to the progress bars with a clean, bold style
+
 progress_tasks = {
-    "LEFT_INDEX": progress_bars["LEFT_INDEX"].add_task(f"[bold {action_styles['RIGHT']}]  {action_symbols['RIGHT']}  [/]", total=100),
-    "LEFT_MIDDLE": progress_bars["LEFT_MIDDLE"].add_task(f"[bold {action_styles['LEFT']}]  {action_symbols['LEFT']}  [/]", total=100),
-    "RIGHT_INDEX": progress_bars["RIGHT_INDEX"].add_task(f"[bold {action_styles['UP']}]  {action_symbols['UP']}  [/]", total=100),
-    "RIGHT_MIDDLE": progress_bars["RIGHT_MIDDLE"].add_task(f"[bold {action_styles['DOWN']}]  {action_symbols['DOWN']}  [/]", total=100),
+    "LEFT_INDEX": progress_bars["LEFT_INDEX"].add_task("", total=100),
+    "LEFT_MIDDLE": progress_bars["LEFT_MIDDLE"].add_task("", total=100),
+    "RIGHT_INDEX": progress_bars["RIGHT_INDEX"].add_task("", total=100),
+    "RIGHT_MIDDLE": progress_bars["RIGHT_MIDDLE"].add_task("", total=100),
 }
+
 
 # --- Helper Functions ---
 
 def is_finger_extended(landmarks, tip_landmark, pip_landmark):
-    """Checks if a specific finger is extended."""
     return landmarks[tip_landmark].y < landmarks[pip_landmark].y
 
 
@@ -364,7 +333,6 @@ def is_peace_sign(hand_landmarks):
 
 
 def is_control_gesture_active(hand_landmarks):
-    """A lenient check requiring only the ring and pinky fingers to be curled."""
     if not hand_landmarks:
         return False
     landmarks = hand_landmarks.landmark
@@ -375,7 +343,6 @@ def is_control_gesture_active(hand_landmarks):
 
 
 def is_high_five(hand_landmarks):
-    """Checks if a hand is doing a high five (all fingers extended)."""
     if not hand_landmarks:
         return False
     landmarks = hand_landmarks.landmark
@@ -391,15 +358,10 @@ def is_high_five(hand_landmarks):
 
 
 def press_key_threaded(key, duration):
-    """
-    Presses a key in a separate thread to avoid blocking the main loop.
-    """
     press(key, duration)
 
 
 # --- Main Loop ---
-
-# Define the layout for the TUI
 layout = Layout()
 layout.split(
     Layout(name="header", size=3),
@@ -407,32 +369,26 @@ layout.split(
 )
 layout["main"].split_row(Layout(name="left"), Layout(name="right"))
 
-# Set up the OpenCV window to be resizable and smaller
 WINDOW_NAME = 'CrossyVision'
 cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-cv2.resizeWindow(WINDOW_NAME, 768, 432) # Width, Height
+cv2.resizeWindow(WINDOW_NAME, 768, 432)
 
+# CRITICAL FIX: Set refresh rate to 60 fps
 with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_per_second=60) as live:
     while True:
-        # Grab the latest processed frame and results from the processor thread
         frame, results = processor.read()
 
-        # If the processor hasn't produced a frame yet, skip the loop
         if frame is None or results is None:
             continue
 
-        # --- Face Masking Logic ---
         if MASK_FACE and face_masker:
             frame = face_masker.apply_mask(frame)
 
-        # --- ALL LOGIC NOW USES THE PROCESSED FRAME AND RESULTS ---
         current_time = time.time()
         frame_height, frame_width, _ = frame.shape
 
-        # Reset finger presence for this frame
         finger_presence = {"LEFT_INDEX": False, "LEFT_MIDDLE": False, "RIGHT_INDEX": False, "RIGHT_MIDDLE": False}
 
-        # Master Gesture Check (Reset)
         reset_gesture_detected = False
         if results.multi_hand_landmarks and len(results.multi_hand_landmarks) == 2:
             hand_states = {}
@@ -449,7 +405,6 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
                 reset_gesture_detected = True
                 if (current_time - last_key_press_time.get('SPACEBAR', 0)) > 1.0:
                     threading.Thread(target=press_key_threaded, args=('SPACEBAR', 0.05), daemon=True).start()
-                    # A restart clears the action history
                     left_hand_actions.clear()
                     right_hand_actions.clear()
                     last_key_press_time['SPACEBAR'] = current_time
@@ -458,7 +413,6 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
             left_hand_in_position = False
             right_hand_in_position = False
             if results.multi_hand_landmarks and len(results.multi_hand_landmarks) == 2:
-                # We need to see both hands to properly manage state
                 for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
                     handedness = results.multi_handedness[i].classification[0].label
                     if handedness == "Left":
@@ -466,7 +420,7 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
                             left_hand_in_position = is_control_gesture_active(hand_landmarks)
                         else:
                             left_hand_in_position = is_peace_sign(hand_landmarks)
-                    else:  # Right
+                    else:
                         if controls_active:
                             right_hand_in_position = is_control_gesture_active(hand_landmarks)
                         else:
@@ -479,17 +433,18 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
                     activation_counter += 1
                     if activation_counter > ACTIVATION_CONFIDENCE_FRAMES:
                         controls_active = True
-                        activation_counter = 0  # Reset counter
+                        activation_counter = 0
                 else:
-                    activation_counter = 0  # Reset if gesture is broken
-            else:  # If controls are currently active
+                    activation_counter = 0
+            else:
                 if not both_hands_in_position:
                     deactivation_counter += 1
                     if deactivation_counter > DEACTIVATION_CONFIDENCE_FRAMES:
                         controls_active = False
-                        deactivation_counter = 0  # Reset counter
+                        deactivation_counter = 0
                 else:
-                    deactivation_counter = 0  # Reset if gesture is maintained
+                    deactivation_counter = 0
+
             if results.multi_hand_landmarks:
                 for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
                     if is_control_gesture_active(hand_landmarks):
@@ -497,8 +452,8 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
                         landmarks = hand_landmarks.landmark
                         control_fingers = {
                             "INDEX": (mp_hands.HandLandmark.INDEX_FINGER_TIP, mp_hands.HandLandmark.INDEX_FINGER_MCP),
-                            "MIDDLE": (mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
-                                       mp_hands.HandLandmark.MIDDLE_FINGER_MCP)}
+                            "MIDDLE": (mp_hands.HandLandmark.MIDDLE_FINGER_TIP, mp_hands.HandLandmark.MIDDLE_FINGER_MCP)
+                        }
                         for finger_name, (tip_id, mcp_id) in control_fingers.items():
                             finger_id = f"{handedness.upper()}_{finger_name}"
                             mcp_pos, tip_pos = landmarks[mcp_id], landmarks[tip_id]
@@ -508,7 +463,7 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
                                 finger_lengths[finger_id] = deque(maxlen=CALIBRATION_FRAMES)
 
                             force_recalibration = False
-                            if not previous_finger_is_above.get(finger_id, True):  # If finger is below the line
+                            if not previous_finger_is_above.get(finger_id, True):
                                 if finger_id in time_finger_went_below and time_finger_went_below[
                                     finger_id] is not None:
                                     if (current_time - time_finger_went_below[finger_id]) > FORCE_CALIBRATION_SECONDS:
@@ -524,14 +479,17 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
                                 dynamic_offset = avg_length * RELATIVE_THRESHOLD_PERCENT
                                 threshold_y = avg_mcp_y - dynamic_offset
                                 trigger_thresholds[finger_id] = threshold_y
-                                if finger_id not in previous_finger_is_above: previous_finger_is_above[
-                                    finger_id] = tip_pos.y < threshold_y
+                                if finger_id not in previous_finger_is_above:
+                                    previous_finger_is_above[finger_id] = tip_pos.y < threshold_y
+
             if controls_active and results.multi_hand_landmarks:
                 for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
                     handedness = results.multi_handedness[i].classification[0].label
                     landmarks = hand_landmarks.landmark
-                    key_mappings = {"INDEX": 'RIGHT' if handedness == "Left" else 'UP',
-                                    "MIDDLE": 'LEFT' if handedness == "Left" else 'DOWN'}
+                    key_mappings = {
+                        "INDEX": 'RIGHT' if handedness == "Left" else 'UP',
+                        "MIDDLE": 'LEFT' if handedness == "Left" else 'DOWN'
+                    }
                     for finger_name, key_action in key_mappings.items():
                         finger_id = f"{handedness.upper()}_{finger_name}"
                         if finger_id in trigger_thresholds:
@@ -550,11 +508,10 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
                                     threading.Thread(target=press_key_threaded, args=(key_action, 0.05),
                                                      daemon=True).start()
 
-                                    # Append the action symbol to the correct deque
                                     symbol = action_symbols.get(key_action, "?")
                                     if handedness == "Left":
                                         left_hand_actions.append(symbol)
-                                    else:  # Right
+                                    else:
                                         right_hand_actions.append(symbol)
 
                                     last_key_press_time[key_action] = current_time
@@ -562,7 +519,7 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
         else:
             controls_active = False
 
-        # --- Visual Feedback (Energy Tether) ---
+        # --- Visual Feedback ---
         overlay = frame.copy()
         FINGER_CONNECTIONS = [
             (mp_hands.HandLandmark.INDEX_FINGER_MCP, mp_hands.HandLandmark.INDEX_FINGER_PIP),
@@ -586,8 +543,10 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
                 for conn in FINGER_CONNECTIONS:
                     for idx in conn:
                         cv2.circle(frame, pixel_landmarks[idx], 3, (0, 0, 255), -1)
-                control_fingers_vis = {"INDEX": mp_hands.HandLandmark.INDEX_FINGER_TIP,
-                                       "MIDDLE": mp_hands.HandLandmark.MIDDLE_FINGER_TIP}
+                control_fingers_vis = {
+                    "INDEX": mp_hands.HandLandmark.INDEX_FINGER_TIP,
+                    "MIDDLE": mp_hands.HandLandmark.MIDDLE_FINGER_TIP
+                }
                 for finger_name, tip_id in control_fingers_vis.items():
                     finger_id = f"{handedness.upper()}_{finger_name}"
                     if finger_id in trigger_thresholds:
@@ -609,22 +568,20 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
                         cv2.line(frame, (tip_pos[0] - 30, threshold_y_px), (tip_pos[0] + 30, threshold_y_px),
                                  line_color, 2)
                         cv2.rectangle(overlay, (tip_pos[0] - 2, tip_pos[1]), (tip_pos[0] + 2, threshold_y_px),
-                                      bar_color,
-                                      -1)
+                                      bar_color, -1)
                         cv2.circle(frame, tip_pos, 5, bar_color, 2)
 
         alpha = 0.4
         cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
 
         # --- TUI Update ---
-        # Update Finger Progress Bars & Track Presence
         if results.multi_hand_landmarks:
             for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
                 handedness = results.multi_handedness[i].classification[0].label
                 landmarks = hand_landmarks.landmark
                 for finger_name in ["INDEX", "MIDDLE"]:
                     finger_id = f"{handedness.upper()}_{finger_name}"
-                    finger_presence[finger_id] = True  # Mark this finger as present
+                    finger_presence[finger_id] = True
 
                     if finger_id in trigger_thresholds and finger_id in mcp_history and len(mcp_history[finger_id]) > 0:
                         avg_mcp_y = sum(mcp_history[finger_id]) / len(mcp_history[finger_id])
@@ -638,15 +595,11 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
                         if total_travel_dist > 1e-6:
                             progress_val = (current_travel / total_travel_dist) * 100
                         progress_val = min(100, max(0, progress_val))
-                        is_activated = not previous_finger_is_above.get(finger_id, True)
+
                         bar = progress_bars[finger_id]
                         task_id = progress_tasks[finger_id]
-                        bar_column = bar.columns[1]
-                        if is_activated:
-                            bar_column.complete_style = "blue"
-                        else:
-                            action = "RIGHT" if finger_id == "LEFT_INDEX" else "LEFT" if finger_id == "LEFT_MIDDLE" else "UP" if finger_id == "RIGHT_INDEX" else "DOWN"
-                            bar_column.complete_style = action_styles.get(action, "cyan")
+
+                        # Update the progress value
                         bar.update(task_id, completed=progress_val)
 
         # --- Update Header Panel ---
@@ -668,18 +621,20 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
         layout["header"].update(
             Panel(status_table, title="CrossyVision", title_align="center", border_style=header_border_style))
 
-        # --- Dynamically Update Hand Panels and Action History ---
+        # --- Hand Panels with Improved Layout ---
         available_width = (console.width // 2) - 4
         max_symbols = max(1, available_width // 2)
         while len(left_hand_actions) > max_symbols:
             left_hand_actions.popleft()
         while len(right_hand_actions) > max_symbols:
             right_hand_actions.popleft()
+
         warm_fade = ["bold light_salmon1", "light_salmon1", "salmon1", "dark_orange3", "grey82", "grey66", "grey50",
                      "grey42", "grey37"]
         cool_fade = ["bold light_slate_grey", "light_slate_grey", "slate_grey1", "slate_grey2", "grey82", "grey66",
                      "grey50", "grey42", "grey37"]
         num_styles = len(warm_fade)
+
         left_action_text = Text(justify="right", no_wrap=True)
         left_history = list(left_hand_actions)
         for i, symbol in enumerate(left_history):
@@ -688,6 +643,7 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
             age = len(left_history) - 1 - i
             style_index = min(age, num_styles - 1)
             left_action_text.append(symbol + " ", style=fade_list[style_index])
+
         right_action_text = Text(justify="left", no_wrap=True)
         right_history = list(right_hand_actions)
         for i, symbol in enumerate(reversed(right_history)):
@@ -696,11 +652,44 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
             age = i
             style_index = min(age, num_styles - 1)
             right_action_text.append(symbol + " ", style=fade_list[style_index])
-        left_progress_group = Group(progress_bars["LEFT_INDEX"], progress_bars["LEFT_MIDDLE"])
-        left_panel_content = Group(left_progress_group, left_action_text)
+
+        # Create improved finger displays with key symbols and progress bars side by side
+        left_index_row = Table.grid(padding=0, expand=True)
+        left_index_row.add_column(width=7)  # Key display column
+        left_index_row.add_column(ratio=1)  # Progress bar column
+        left_index_row.add_row(
+            create_key_display(action_symbols['RIGHT'], 'RIGHT'),
+            progress_bars["LEFT_INDEX"]
+        )
+
+        left_middle_row = Table.grid(padding=0, expand=True)
+        left_middle_row.add_column(width=7)
+        left_middle_row.add_column(ratio=1)
+        left_middle_row.add_row(
+            create_key_display(action_symbols['LEFT'], 'LEFT'),
+            progress_bars["LEFT_MIDDLE"]
+        )
+
+        right_index_row = Table.grid(padding=0, expand=True)
+        right_index_row.add_column(width=7)
+        right_index_row.add_column(ratio=1)
+        right_index_row.add_row(
+            create_key_display(action_symbols['UP'], 'UP'),
+            progress_bars["RIGHT_INDEX"]
+        )
+
+        right_middle_row = Table.grid(padding=0, expand=True)
+        right_middle_row.add_column(width=7)
+        right_middle_row.add_column(ratio=1)
+        right_middle_row.add_row(
+            create_key_display(action_symbols['DOWN'], 'DOWN'),
+            progress_bars["RIGHT_MIDDLE"]
+        )
+
+        left_panel_content = Group(left_index_row, left_middle_row, left_action_text)
         layout["left"].update(Panel(left_panel_content, title="Left Hand", border_style="blue"))
-        right_progress_group = Group(progress_bars["RIGHT_INDEX"], progress_bars["RIGHT_MIDDLE"])
-        right_panel_content = Group(right_progress_group, right_action_text)
+
+        right_panel_content = Group(right_index_row, right_middle_row, right_action_text)
         layout["right"].update(Panel(right_panel_content, title="Right Hand", border_style="blue"))
 
         cv2.imshow(WINDOW_NAME, frame)
