@@ -298,6 +298,8 @@ right_hand_actions = deque()
 action_symbols = {
     "UP": "↑", "DOWN": "↓", "LEFT": "←", "RIGHT": "→", "SPACEBAR": "↺"
 }
+# Dictionary to track which control fingers are currently detected on screen
+finger_presence = {}
 
 # FPS calculation
 prev_frame_time = 0
@@ -319,19 +321,24 @@ activation_counter = 0
 deactivation_counter = 0
 
 # --- TUI Elements ---
+
+# Define color schemes for actions
+action_styles = {"UP": "yellow", "RIGHT": "yellow", "DOWN": "cyan", "LEFT": "cyan"}
+symbol_to_action = {v: k for k, v in action_symbols.items()}
+
 # Create progress bars for each finger using a thick block style
 progress_bars = {
-    "LEFT_INDEX": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
-    "LEFT_MIDDLE": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
-    "RIGHT_INDEX": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
-    "RIGHT_MIDDLE": Progress(TextColumn("{task.description}", justify="right"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
+    "LEFT_INDEX": Progress(TextColumn("{task.description}", justify="left"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
+    "LEFT_MIDDLE": Progress(TextColumn("{task.description}", justify="left"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
+    "RIGHT_INDEX": Progress(TextColumn("{task.description}", justify="left"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
+    "RIGHT_MIDDLE": Progress(TextColumn("{task.description}", justify="left"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
 }
-# Add tasks to the progress bars
+# Add tasks to the progress bars with padding for centered alignment
 progress_tasks = {
-    "LEFT_INDEX": progress_bars["LEFT_INDEX"].add_task("[cyan]RIGHT (Index)  ", total=100),
-    "LEFT_MIDDLE": progress_bars["LEFT_MIDDLE"].add_task("[cyan]LEFT (Middle)", total=100),
-    "RIGHT_INDEX": progress_bars["RIGHT_INDEX"].add_task("[cyan]UP (Index) ", total=100),
-    "RIGHT_MIDDLE": progress_bars["RIGHT_MIDDLE"].add_task("[cyan]DOWN (Middle)", total=100),
+    "LEFT_INDEX": progress_bars["LEFT_INDEX"].add_task(f"[{action_styles['RIGHT']}] RIGHT", total=100),
+    "LEFT_MIDDLE": progress_bars["LEFT_MIDDLE"].add_task(f"[{action_styles['LEFT']}] LEFT ", total=100),
+    "RIGHT_INDEX": progress_bars["RIGHT_INDEX"].add_task(f"[{action_styles['UP']}]  UP  ", total=100),
+    "RIGHT_MIDDLE": progress_bars["RIGHT_MIDDLE"].add_task(f"[{action_styles['DOWN']}] DOWN ", total=100),
 }
 
 
@@ -401,7 +408,7 @@ layout.split(
 layout["main"].split_row(Layout(name="left"), Layout(name="right"))
 
 # Set up the OpenCV window to be resizable and smaller
-WINDOW_NAME = 'CrossyVision Controller'
+WINDOW_NAME = 'CrossyVision'
 cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 cv2.resizeWindow(WINDOW_NAME, 768, 432) # Width, Height
 
@@ -421,6 +428,9 @@ with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
         # --- ALL LOGIC NOW USES THE PROCESSED FRAME AND RESULTS ---
         current_time = time.time()
         frame_height, frame_width, _ = frame.shape
+
+        # Reset finger presence for this frame
+        finger_presence = {"LEFT_INDEX": False, "LEFT_MIDDLE": False, "RIGHT_INDEX": False, "RIGHT_MIDDLE": False}
 
         # Master Gesture Check (Reset)
         reset_gesture_detected = False
@@ -468,7 +478,6 @@ with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
                 if both_hands_in_position:
                     activation_counter += 1
                     if activation_counter > ACTIVATION_CONFIDENCE_FRAMES:
-                        log.info("CONTROLS ACTIVATED")
                         controls_active = True
                         activation_counter = 0  # Reset counter
                 else:
@@ -477,7 +486,6 @@ with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
                 if not both_hands_in_position:
                     deactivation_counter += 1
                     if deactivation_counter > DEACTIVATION_CONFIDENCE_FRAMES:
-                        log.info("CONTROLS DEACTIVATED")
                         controls_active = False
                         deactivation_counter = 0  # Reset counter
                 else:
@@ -609,107 +617,92 @@ with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
         cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
 
         # --- TUI Update ---
-
-        # Update Header
-        status_text = Text("CONTROLS ACTIVE", style="bold green", justify="center") if controls_active else Text(
-            "CONTROLS INACTIVE", style="bold red", justify="center")
-        layout["header"].update(Panel(status_text, title="CrossyVision Controller", border_style="blue"))
-
-        # Update Finger Progress Bars
+        # Update Finger Progress Bars & Track Presence
         if results.multi_hand_landmarks:
             for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
                 handedness = results.multi_handedness[i].classification[0].label
                 landmarks = hand_landmarks.landmark
                 for finger_name in ["INDEX", "MIDDLE"]:
                     finger_id = f"{handedness.upper()}_{finger_name}"
+                    finger_presence[finger_id] = True  # Mark this finger as present
 
                     # Ensure we have calibration data for this finger
                     if finger_id in trigger_thresholds and finger_id in mcp_history and len(mcp_history[finger_id]) > 0:
                         # --- New Progress Calculation ---
-                        # Get current calibration averages
                         avg_mcp_y = sum(mcp_history[finger_id]) / len(mcp_history[finger_id])
                         avg_length = sum(finger_lengths[finger_id]) / len(finger_lengths[finger_id])
-
-                        # Define the start (0%) and end (100%) points of the gesture
-                        y_extended_tip = avg_mcp_y - avg_length  # Furthest point = 0%
-                        y_activation = trigger_thresholds[finger_id]  # Activation line = 100%
-
-                        # Get current finger position
+                        y_extended_tip = avg_mcp_y - avg_length
+                        y_activation = trigger_thresholds[finger_id]
                         y_current_tip = landmarks[mp_hands.HandLandmark[f"{finger_name}_FINGER_TIP"]].y
 
-                        # Calculate progress
                         total_travel_dist = y_activation - y_extended_tip
                         current_travel = y_current_tip - y_extended_tip
-
                         progress_val = 0
-                        if total_travel_dist > 1e-6:  # Avoid division by zero
+                        if total_travel_dist > 1e-6:
                             progress_val = (current_travel / total_travel_dist) * 100
-
-                        # Clamp the value between 0 and 100
                         progress_val = min(100, max(0, progress_val))
 
                         # --- Update TUI Element ---
                         is_activated = not previous_finger_is_above.get(finger_id, True)
                         bar = progress_bars[finger_id]
                         task_id = progress_tasks[finger_id]
-
-                        # Change bar color based on activation state
-                        bar_column = bar.columns[1]  # The BarColumn is the second column
+                        bar_column = bar.columns[1]
                         if is_activated:
-                            # When activated, make the filled part of the bar red
                             bar_column.complete_style = "red"
                         else:
-                            # When not activated, use the default cyan color
-                            bar_column.complete_style = "cyan"
-
+                            action = "UP" if finger_id in ["RIGHT_INDEX", "LEFT_INDEX"] else "DOWN"
+                            bar_column.complete_style = action_styles.get(action, "cyan")
                         bar.update(task_id, completed=progress_val)
 
+        # --- Update Header Panel ---
+        all_fingers_present = all(finger_presence.values())
+        header_border_style = "bold bright_cyan" if all_fingers_present else "blue"
+        status_indicators = []
+        labels = {"LEFT_INDEX": "L.INDEX", "LEFT_MIDDLE": "L.MIDDLE", "RIGHT_INDEX": "R.INDEX",
+                  "RIGHT_MIDDLE": "R.MIDDLE"}
+        for finger_id, label in labels.items():
+            style = "bold green" if finger_presence.get(finger_id, False) else "grey30"
+            status_indicators.append(Text(label, style=style, justify="center"))
+        header_content = Columns(status_indicators, expand=True, equal=True)
+        layout["header"].update(
+            Panel(header_content, title="CrossyVision", title_align="left", border_style=header_border_style))
+
         # --- Dynamically Update Hand Panels and Action History ---
-
-        # Calculate the available width for text inside each panel
-        available_width = (console.width // 2) - 4  # Account for panel border/padding
-        max_symbols = max(1, available_width // 2)  # Each symbol takes 2 chars (symbol + space)
-
-        # Dynamically trim the deques to the visible size
+        available_width = (console.width // 2) - 4
+        max_symbols = max(1, available_width // 2)
         while len(left_hand_actions) > max_symbols:
             left_hand_actions.popleft()
         while len(right_hand_actions) > max_symbols:
             right_hand_actions.popleft()
 
-        # Define the color fade effect: brightest for newest, dimmest for oldest
-        fade_styles = ["bright_white", "white", "grey82", "grey66", "grey50", "grey37", "grey23"]
-        num_styles = len(fade_styles)
+        warm_fade = ["bright_yellow", "yellow", "gold3", "darkgoldenrod", "grey50", "grey37"]
+        cool_fade = ["bright_cyan", "cyan", "turquoise2", "dark_turquoise", "grey50", "grey37"]
+        num_styles = len(warm_fade)
 
-        # --- Build Styled Text for Left Hand ---
         left_action_text = Text(justify="right", no_wrap=True)
         left_history = list(left_hand_actions)
         for i, symbol in enumerate(left_history):
-            # "Age" is how far from the end of the list the item is (0 = newest)
+            action = symbol_to_action.get(symbol)
+            fade_list = warm_fade if action in ["UP", "RIGHT"] else cool_fade
             age = len(left_history) - 1 - i
-            # Clamp the age to the number of styles we have
             style_index = min(age, num_styles - 1)
-            # The newest item gets the first, brightest style in the list
-            final_style = fade_styles[style_index]
-            left_action_text.append(symbol + " ", style=final_style)
+            left_action_text.append(symbol + " ", style=fade_list[style_index])
 
-        # --- Build Styled Text for Right Hand ---
         right_action_text = Text(justify="left", no_wrap=True)
         right_history = list(right_hand_actions)
-        # Iterate in REVERSE to place the newest (brightest) item on the left
         for i, symbol in enumerate(reversed(right_history)):
-            # In a reversed list, the index 'i' is the age (0 = newest)
+            action = symbol_to_action.get(symbol)
+            fade_list = warm_fade if action in ["UP", "RIGHT"] else cool_fade
             age = i
             style_index = min(age, num_styles - 1)
-            final_style = fade_styles[style_index]
-            right_action_text.append(symbol + " ", style=final_style)
+            right_action_text.append(symbol + " ", style=fade_list[style_index])
 
-        # --- Update Panels with new styled text ---
         left_progress_group = Group(progress_bars["LEFT_INDEX"], progress_bars["LEFT_MIDDLE"])
-        left_panel_content = Group(left_progress_group, "\n", left_action_text)
+        left_panel_content = Group(left_progress_group, left_action_text)
         layout["left"].update(Panel(left_panel_content, title="Left Hand", border_style="blue"))
 
         right_progress_group = Group(progress_bars["RIGHT_INDEX"], progress_bars["RIGHT_MIDDLE"])
-        right_panel_content = Group(right_progress_group, "\n", right_action_text)
+        right_panel_content = Group(right_progress_group, right_action_text)
         layout["right"].update(Panel(right_panel_content, title="Right Hand", border_style="blue"))
 
         cv2.imshow(WINDOW_NAME, frame)
