@@ -9,6 +9,7 @@ import numpy as np
 
 # --- Rich TUI Imports ---
 from rich.console import Console, Group
+from rich.table import Table
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
@@ -323,7 +324,7 @@ deactivation_counter = 0
 # --- TUI Elements ---
 
 # Define color schemes for actions
-action_styles = {"UP": "yellow", "RIGHT": "yellow", "DOWN": "cyan", "LEFT": "cyan"}
+action_styles = {"UP": "light_salmon1", "RIGHT": "light_salmon1", "DOWN": "light_slate_grey", "LEFT": "light_slate_grey"}
 symbol_to_action = {v: k for k, v in action_symbols.items()}
 
 # Create progress bars for each finger using a thick block style
@@ -333,14 +334,16 @@ progress_bars = {
     "RIGHT_INDEX": Progress(TextColumn("{task.description}", justify="left"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
     "RIGHT_MIDDLE": Progress(TextColumn("{task.description}", justify="left"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
 }
-# Add tasks to the progress bars with padding for centered alignment
+# Add tasks to the progress bars with a simulated pixel-art button style
+outer_border = "white"
+inner_border = "grey50"
+button_face = "on grey23"
 progress_tasks = {
-    "LEFT_INDEX": progress_bars["LEFT_INDEX"].add_task(f"[{action_styles['RIGHT']}] RIGHT", total=100),
-    "LEFT_MIDDLE": progress_bars["LEFT_MIDDLE"].add_task(f"[{action_styles['LEFT']}] LEFT ", total=100),
-    "RIGHT_INDEX": progress_bars["RIGHT_INDEX"].add_task(f"[{action_styles['UP']}]  UP  ", total=100),
-    "RIGHT_MIDDLE": progress_bars["RIGHT_MIDDLE"].add_task(f"[{action_styles['DOWN']}] DOWN ", total=100),
+    "LEFT_INDEX": progress_bars["LEFT_INDEX"].add_task(f"[{outer_border}]([{inner_border}][{button_face}][{action_styles['RIGHT']}] {action_symbols['RIGHT']} [/][/][/][{outer_border}])[/]", total=100),
+    "LEFT_MIDDLE": progress_bars["LEFT_MIDDLE"].add_task(f"[{outer_border}]([{inner_border}][{button_face}][{action_styles['LEFT']}] {action_symbols['LEFT']} [/][/][/][{outer_border}])[/]", total=100),
+    "RIGHT_INDEX": progress_bars["RIGHT_INDEX"].add_task(f"[{outer_border}]([{inner_border}][{button_face}][{action_styles['UP']}] {action_symbols['UP']} [/][/][/][{outer_border}])[/]", total=100),
+    "RIGHT_MIDDLE": progress_bars["RIGHT_MIDDLE"].add_task(f"[{outer_border}]([{inner_border}][{button_face}][{action_styles['DOWN']}] {action_symbols['DOWN']} [/][/][/][{outer_border}])[/]", total=100),
 }
-
 
 # --- Helper Functions ---
 
@@ -626,46 +629,47 @@ with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
                     finger_id = f"{handedness.upper()}_{finger_name}"
                     finger_presence[finger_id] = True  # Mark this finger as present
 
-                    # Ensure we have calibration data for this finger
                     if finger_id in trigger_thresholds and finger_id in mcp_history and len(mcp_history[finger_id]) > 0:
-                        # --- New Progress Calculation ---
                         avg_mcp_y = sum(mcp_history[finger_id]) / len(mcp_history[finger_id])
                         avg_length = sum(finger_lengths[finger_id]) / len(finger_lengths[finger_id])
                         y_extended_tip = avg_mcp_y - avg_length
                         y_activation = trigger_thresholds[finger_id]
                         y_current_tip = landmarks[mp_hands.HandLandmark[f"{finger_name}_FINGER_TIP"]].y
-
                         total_travel_dist = y_activation - y_extended_tip
                         current_travel = y_current_tip - y_extended_tip
                         progress_val = 0
                         if total_travel_dist > 1e-6:
                             progress_val = (current_travel / total_travel_dist) * 100
                         progress_val = min(100, max(0, progress_val))
-
-                        # --- Update TUI Element ---
                         is_activated = not previous_finger_is_above.get(finger_id, True)
                         bar = progress_bars[finger_id]
                         task_id = progress_tasks[finger_id]
                         bar_column = bar.columns[1]
                         if is_activated:
-                            bar_column.complete_style = "red"
+                            bar_column.complete_style = "blue"
                         else:
-                            action = "UP" if finger_id in ["RIGHT_INDEX", "LEFT_INDEX"] else "DOWN"
+                            action = "RIGHT" if finger_id == "LEFT_INDEX" else "LEFT" if finger_id == "LEFT_MIDDLE" else "UP" if finger_id == "RIGHT_INDEX" else "DOWN"
                             bar_column.complete_style = action_styles.get(action, "cyan")
                         bar.update(task_id, completed=progress_val)
 
         # --- Update Header Panel ---
         all_fingers_present = all(finger_presence.values())
-        header_border_style = "bold bright_cyan" if all_fingers_present else "blue"
-        status_indicators = []
-        labels = {"LEFT_INDEX": "L.INDEX", "LEFT_MIDDLE": "L.MIDDLE", "RIGHT_INDEX": "R.INDEX",
-                  "RIGHT_MIDDLE": "R.MIDDLE"}
-        for finger_id, label in labels.items():
+        header_border_style = "bold green" if all_fingers_present else "blue"
+        status_table = Table.grid(expand=True)
+        status_table.add_column(justify="left")
+        status_table.add_column(justify="center")
+        status_table.add_column(justify="center")
+        status_table.add_column(justify="right")
+        labels_map = {"LEFT_INDEX": "L.INDEX", "LEFT_MIDDLE": "L.MIDDLE", "RIGHT_INDEX": "R.INDEX",
+                      "RIGHT_MIDDLE": "R.MIDDLE"}
+        finger_ids_order = ["LEFT_INDEX", "LEFT_MIDDLE", "RIGHT_INDEX", "RIGHT_MIDDLE"]
+        styled_labels = []
+        for finger_id in finger_ids_order:
             style = "bold green" if finger_presence.get(finger_id, False) else "grey30"
-            status_indicators.append(Text(label, style=style, justify="center"))
-        header_content = Columns(status_indicators, expand=True, equal=True)
+            styled_labels.append(Text(labels_map[finger_id], style=style))
+        status_table.add_row(*styled_labels)
         layout["header"].update(
-            Panel(header_content, title="CrossyVision", title_align="left", border_style=header_border_style))
+            Panel(status_table, title="CrossyVision", title_align="center", border_style=header_border_style))
 
         # --- Dynamically Update Hand Panels and Action History ---
         available_width = (console.width // 2) - 4
@@ -674,11 +678,11 @@ with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
             left_hand_actions.popleft()
         while len(right_hand_actions) > max_symbols:
             right_hand_actions.popleft()
-
-        warm_fade = ["bright_yellow", "yellow", "gold3", "darkgoldenrod", "grey50", "grey37"]
-        cool_fade = ["bright_cyan", "cyan", "turquoise2", "dark_turquoise", "grey50", "grey37"]
+        warm_fade = ["bold light_salmon1", "light_salmon1", "salmon1", "dark_orange3", "grey82", "grey66", "grey50",
+                     "grey42", "grey37"]
+        cool_fade = ["bold light_slate_grey", "light_slate_grey", "slate_grey1", "slate_grey2", "grey82", "grey66",
+                     "grey50", "grey42", "grey37"]
         num_styles = len(warm_fade)
-
         left_action_text = Text(justify="right", no_wrap=True)
         left_history = list(left_hand_actions)
         for i, symbol in enumerate(left_history):
@@ -687,7 +691,6 @@ with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
             age = len(left_history) - 1 - i
             style_index = min(age, num_styles - 1)
             left_action_text.append(symbol + " ", style=fade_list[style_index])
-
         right_action_text = Text(justify="left", no_wrap=True)
         right_history = list(right_hand_actions)
         for i, symbol in enumerate(reversed(right_history)):
@@ -696,11 +699,9 @@ with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
             age = i
             style_index = min(age, num_styles - 1)
             right_action_text.append(symbol + " ", style=fade_list[style_index])
-
         left_progress_group = Group(progress_bars["LEFT_INDEX"], progress_bars["LEFT_MIDDLE"])
         left_panel_content = Group(left_progress_group, left_action_text)
         layout["left"].update(Panel(left_panel_content, title="Left Hand", border_style="blue"))
-
         right_progress_group = Group(progress_bars["RIGHT_INDEX"], progress_bars["RIGHT_MIDDLE"])
         right_panel_content = Group(right_progress_group, right_action_text)
         layout["right"].update(Panel(right_panel_content, title="Right Hand", border_style="blue"))
