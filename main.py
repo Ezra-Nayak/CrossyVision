@@ -334,15 +334,12 @@ progress_bars = {
     "RIGHT_INDEX": Progress(TextColumn("{task.description}", justify="left"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
     "RIGHT_MIDDLE": Progress(TextColumn("{task.description}", justify="left"), BarColumn(bar_width=None, style="grey30", complete_style="cyan"), console=console),
 }
-# Add tasks to the progress bars with a simulated pixel-art button style
-outer_border = "white"
-inner_border = "grey50"
-button_face = "on grey23"
+# Add tasks to the progress bars with a clean, bold style
 progress_tasks = {
-    "LEFT_INDEX": progress_bars["LEFT_INDEX"].add_task(f"[{outer_border}]([{inner_border}][{button_face}][{action_styles['RIGHT']}] {action_symbols['RIGHT']} [/][/][/][{outer_border}])[/]", total=100),
-    "LEFT_MIDDLE": progress_bars["LEFT_MIDDLE"].add_task(f"[{outer_border}]([{inner_border}][{button_face}][{action_styles['LEFT']}] {action_symbols['LEFT']} [/][/][/][{outer_border}])[/]", total=100),
-    "RIGHT_INDEX": progress_bars["RIGHT_INDEX"].add_task(f"[{outer_border}]([{inner_border}][{button_face}][{action_styles['UP']}] {action_symbols['UP']} [/][/][/][{outer_border}])[/]", total=100),
-    "RIGHT_MIDDLE": progress_bars["RIGHT_MIDDLE"].add_task(f"[{outer_border}]([{inner_border}][{button_face}][{action_styles['DOWN']}] {action_symbols['DOWN']} [/][/][/][{outer_border}])[/]", total=100),
+    "LEFT_INDEX": progress_bars["LEFT_INDEX"].add_task(f"[bold {action_styles['RIGHT']}]  {action_symbols['RIGHT']}  [/]", total=100),
+    "LEFT_MIDDLE": progress_bars["LEFT_MIDDLE"].add_task(f"[bold {action_styles['LEFT']}]  {action_symbols['LEFT']}  [/]", total=100),
+    "RIGHT_INDEX": progress_bars["RIGHT_INDEX"].add_task(f"[bold {action_styles['UP']}]  {action_symbols['UP']}  [/]", total=100),
+    "RIGHT_MIDDLE": progress_bars["RIGHT_MIDDLE"].add_task(f"[bold {action_styles['DOWN']}]  {action_symbols['DOWN']}  [/]", total=100),
 }
 
 # --- Helper Functions ---
@@ -415,7 +412,7 @@ WINDOW_NAME = 'CrossyVision'
 cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 cv2.resizeWindow(WINDOW_NAME, 768, 432) # Width, Height
 
-with Live(layout, screen=True, redirect_stderr=False, console=console) as live:
+with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_per_second=60) as live:
     while True:
         # Grab the latest processed frame and results from the processor thread
         frame, results = processor.read()
