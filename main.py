@@ -631,15 +631,19 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
                                                            action_styles['LEFT'])
 
         # Add vertical padding to align horizontal arrows with vertical ones
-        vertical_padding = Text("\n\n")
-        right_arrow_text = vertical_padding + right_arrow_text
-        left_arrow_text = vertical_padding + left_arrow_text
+        vertical_padding_left = Text("\n\n")
+        vertical_padding_right = Text("\n")
+        right_arrow_text = vertical_padding_left + right_arrow_text
+        left_arrow_text = vertical_padding_left + left_arrow_text
 
         # Right Hand
         up_arrow_text = ascii_arrow.create_braille_arrow(up_dots, up_dims, finger_progress["RIGHT_INDEX"], 'up',
                                                          action_styles['UP'])
         down_arrow_text = ascii_arrow.create_braille_arrow(down_dots, down_dims, finger_progress["RIGHT_MIDDLE"],
                                                            'down', action_styles['DOWN'])
+
+        up_arrow_text = vertical_padding_right + up_arrow_text
+        down_arrow_text = vertical_padding_right + down_arrow_text
 
         # Arrange arrows side-by-side in columns for a cleaner layout
         left_arrow_columns = Columns([
