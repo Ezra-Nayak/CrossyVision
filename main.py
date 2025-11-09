@@ -630,22 +630,39 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
         left_arrow_text = ascii_arrow.create_braille_arrow(left_dots, left_dims, finger_progress["LEFT_MIDDLE"], 'left',
                                                            action_styles['LEFT'])
 
+        # Add vertical padding to align horizontal arrows with vertical ones
+        vertical_padding_left = Text("\n\n")
+        vertical_padding_right = Text("\n")
+        right_arrow_text = vertical_padding_left + right_arrow_text
+        left_arrow_text = vertical_padding_left + left_arrow_text
+
         # Right Hand
         up_arrow_text = ascii_arrow.create_braille_arrow(up_dots, up_dims, finger_progress["RIGHT_INDEX"], 'up',
                                                          action_styles['UP'])
         down_arrow_text = ascii_arrow.create_braille_arrow(down_dots, down_dims, finger_progress["RIGHT_MIDDLE"],
                                                            'down', action_styles['DOWN'])
 
-        left_panel_content = Group(
-            Align.center(right_arrow_text),
+        up_arrow_text = vertical_padding_right + up_arrow_text
+        down_arrow_text = vertical_padding_right + down_arrow_text
+
+        # Arrange arrows side-by-side in columns for a cleaner layout
+        left_arrow_columns = Columns([
             Align.center(left_arrow_text),
+            Align.center(right_arrow_text)
+        ], expand=True)
+        left_panel_content = Group(
+            left_arrow_columns,
+            Text("\n"),  # Add a newline for spacing
             left_action_text
         )
         layout["left"].update(Panel(left_panel_content, title="Left Hand", border_style="blue"))
 
-        right_panel_content = Group(
+        right_arrow_columns = Columns([
             Align.center(up_arrow_text),
-            Align.center(down_arrow_text),
+            Align.center(down_arrow_text)
+        ], expand=True)
+        right_panel_content = Group(
+            right_arrow_columns,
             right_action_text
         )
         layout["right"].update(Panel(right_panel_content, title="Right Hand", border_style="blue"))
