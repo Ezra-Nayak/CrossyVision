@@ -46,15 +46,10 @@ The application uses a multi-threaded architecture to process video and gestures
     cd CrossyVision
     ```
 
-2.  **Create and activate a virtual environment (recommended):**
+2.  **Create and activate a virtual environment:**
     ```bash
-    # For Windows
     python -m venv venv
     .\venv\Scripts\activate
-
-    # For macOS/Linux
-    python3 -m venv venv
-    source venv/bin/activate
     ```
 
 3.  **Install the required dependencies:**
