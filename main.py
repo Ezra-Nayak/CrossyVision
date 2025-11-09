@@ -17,7 +17,9 @@ from rich.progress import Progress, BarColumn, TextColumn
 from rich.columns import Columns
 from rich.text import Text
 from rich.box import ROUNDED
+from rich.align import Align
 import logging
+import ascii_arrow
 
 # --- Standard Logging & TUI Setup ---
 logging.basicConfig(level=logging.CRITICAL)
@@ -258,60 +260,6 @@ action_styles = {"UP": "light_salmon1", "RIGHT": "light_salmon1", "DOWN": "light
                  "LEFT": "light_slate_grey"}
 symbol_to_action = {v: k for k, v in action_symbols.items()}
 
-
-def create_key_display(symbol, action_name):
-    """Creates a nested bordered key display."""
-    # Inner panel with grey border
-    inner = Panel(
-        Text(symbol, justify="center", style=f"bold {action_styles[action_name]}"),
-        border_style="grey50",
-        box=ROUNDED,
-        padding=(0, 1),
-        expand=False
-    )
-    # Outer panel with white border
-    outer = Panel(
-        inner,
-        border_style="white",
-        box=ROUNDED,
-        padding=(0, 0),
-        expand=False
-    )
-    return outer
-
-
-# Create separate progress bars without the arrow in the description
-progress_bars = {
-    "LEFT_INDEX": Progress(
-        BarColumn(bar_width=None, style="grey30", complete_style=action_styles['RIGHT']),
-        console=console,
-        expand=True
-    ),
-    "LEFT_MIDDLE": Progress(
-        BarColumn(bar_width=None, style="grey30", complete_style=action_styles['LEFT']),
-        console=console,
-        expand=True
-    ),
-    "RIGHT_INDEX": Progress(
-        BarColumn(bar_width=None, style="grey30", complete_style=action_styles['UP']),
-        console=console,
-        expand=True
-    ),
-    "RIGHT_MIDDLE": Progress(
-        BarColumn(bar_width=None, style="grey30", complete_style=action_styles['DOWN']),
-        console=console,
-        expand=True
-    ),
-}
-
-progress_tasks = {
-    "LEFT_INDEX": progress_bars["LEFT_INDEX"].add_task("", total=100),
-    "LEFT_MIDDLE": progress_bars["LEFT_MIDDLE"].add_task("", total=100),
-    "RIGHT_INDEX": progress_bars["RIGHT_INDEX"].add_task("", total=100),
-    "RIGHT_MIDDLE": progress_bars["RIGHT_MIDDLE"].add_task("", total=100),
-}
-
-
 # --- Helper Functions ---
 
 def is_finger_extended(landmarks, tip_landmark, pip_landmark):
@@ -362,6 +310,27 @@ def press_key_threaded(key, duration):
 
 
 # --- Main Loop ---
+
+# --- Arrow TUI Initialization ---
+base_up_arrow_map = [
+    "       XX       ",
+    "      XXXX      ",
+    "     XXXXXX     ",
+    "    XXXXXXXX    ",
+    "   XXXXXXXXXX   ",
+    "  XXXXXXXXXXXX  ",
+    " XXXXXXXXXXXXXX ",
+    "     XXXXXX     ",
+    "     XXXXXX     ",
+    "     XXXXXX     ",
+]
+base_dots = ascii_arrow.generate_base_dots(base_up_arrow_map)
+up_dots, up_dims = ascii_arrow.rotate_dots(base_dots, 'up')
+down_dots, down_dims = ascii_arrow.rotate_dots(base_dots, 'down')
+left_dots, left_dims = ascii_arrow.rotate_dots(base_dots, 'left')
+right_dots, right_dims = ascii_arrow.rotate_dots(base_dots, 'right')
+# --- End Arrow TUI Initialization ---
+
 layout = Layout()
 layout.split(
     Layout(name="header", size=3),
@@ -575,6 +544,11 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
         cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
 
         # --- TUI Update ---
+        finger_progress = {
+            "LEFT_INDEX": 0.0, "LEFT_MIDDLE": 0.0,
+            "RIGHT_INDEX": 0.0, "RIGHT_MIDDLE": 0.0
+        }
+
         if results.multi_hand_landmarks:
             for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
                 handedness = results.multi_handedness[i].classification[0].label
@@ -594,13 +568,9 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
                         progress_val = 0
                         if total_travel_dist > 1e-6:
                             progress_val = (current_travel / total_travel_dist) * 100
+
                         progress_val = min(100, max(0, progress_val))
-
-                        bar = progress_bars[finger_id]
-                        task_id = progress_tasks[finger_id]
-
-                        # Update the progress value
-                        bar.update(task_id, completed=progress_val)
+                        finger_progress[finger_id] = progress_val / 100.0
 
         # --- Update Header Panel ---
         all_fingers_present = all(finger_presence.values())
@@ -653,43 +623,31 @@ with Live(layout, screen=True, redirect_stderr=False, console=console, refresh_p
             style_index = min(age, num_styles - 1)
             right_action_text.append(symbol + " ", style=fade_list[style_index])
 
-        # Create improved finger displays with key symbols and progress bars side by side
-        left_index_row = Table.grid(padding=0, expand=True)
-        left_index_row.add_column(width=7)  # Key display column
-        left_index_row.add_column(ratio=1)  # Progress bar column
-        left_index_row.add_row(
-            create_key_display(action_symbols['RIGHT'], 'RIGHT'),
-            progress_bars["LEFT_INDEX"]
-        )
+        # Create animated braille arrows based on finger progress
+        # Left Hand (Note: LEFT_INDEX controls RIGHT key, LEFT_MIDDLE controls LEFT key)
+        right_arrow_text = ascii_arrow.create_braille_arrow(right_dots, right_dims, finger_progress["LEFT_INDEX"],
+                                                            'right', action_styles['RIGHT'])
+        left_arrow_text = ascii_arrow.create_braille_arrow(left_dots, left_dims, finger_progress["LEFT_MIDDLE"], 'left',
+                                                           action_styles['LEFT'])
 
-        left_middle_row = Table.grid(padding=0, expand=True)
-        left_middle_row.add_column(width=7)
-        left_middle_row.add_column(ratio=1)
-        left_middle_row.add_row(
-            create_key_display(action_symbols['LEFT'], 'LEFT'),
-            progress_bars["LEFT_MIDDLE"]
-        )
+        # Right Hand
+        up_arrow_text = ascii_arrow.create_braille_arrow(up_dots, up_dims, finger_progress["RIGHT_INDEX"], 'up',
+                                                         action_styles['UP'])
+        down_arrow_text = ascii_arrow.create_braille_arrow(down_dots, down_dims, finger_progress["RIGHT_MIDDLE"],
+                                                           'down', action_styles['DOWN'])
 
-        right_index_row = Table.grid(padding=0, expand=True)
-        right_index_row.add_column(width=7)
-        right_index_row.add_column(ratio=1)
-        right_index_row.add_row(
-            create_key_display(action_symbols['UP'], 'UP'),
-            progress_bars["RIGHT_INDEX"]
+        left_panel_content = Group(
+            Align.center(right_arrow_text),
+            Align.center(left_arrow_text),
+            left_action_text
         )
-
-        right_middle_row = Table.grid(padding=0, expand=True)
-        right_middle_row.add_column(width=7)
-        right_middle_row.add_column(ratio=1)
-        right_middle_row.add_row(
-            create_key_display(action_symbols['DOWN'], 'DOWN'),
-            progress_bars["RIGHT_MIDDLE"]
-        )
-
-        left_panel_content = Group(left_index_row, left_middle_row, left_action_text)
         layout["left"].update(Panel(left_panel_content, title="Left Hand", border_style="blue"))
 
-        right_panel_content = Group(right_index_row, right_middle_row, right_action_text)
+        right_panel_content = Group(
+            Align.center(up_arrow_text),
+            Align.center(down_arrow_text),
+            right_action_text
+        )
         layout["right"].update(Panel(right_panel_content, title="Right Hand", border_style="blue"))
 
         cv2.imshow(WINDOW_NAME, frame)
